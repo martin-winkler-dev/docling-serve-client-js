@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { isPlainObject } from './core/validate.js';
-import type { DoclingDocument, PageItem, ProvenanceItem } from './document.js';
+import type { BoundingBox, DoclingDocument, PageItem } from './document.js';
 import type {
     ExtractedImage,
     ImageOptions,
@@ -154,7 +154,7 @@ export function extractImages(markdown: string, options: Required<ImageOptions>)
         }
         const size = readPngSize(bytes);
         if (options.omitSmall && size !== undefined && isSmallImage(size)) {
-            // a marker, so removing it below also normalizes the blank lines around it
+            // Marker, so removing it below also normalizes surrounding blank lines.
             output += OMITTED_IMAGE;
             continue;
         }
@@ -218,11 +218,11 @@ export function extractPageImages(document: DoclingDocument): ExtractedPageImage
  * - `prov`: any `prov[]` entry; for a table cell pass `{ page_no: table.prov[0].page_no, bbox: cell.bbox }`
  * - flips `BOTTOMLEFT` boxes using the page height from `document.pages`, then scales points by `PAGE_IMAGE_SCALE`
  * - works without `pageImages: true`; the boxes fit the page images of any conversion by this client
- * - returns `undefined` when page_no or a coordinate is not a finite number, or page is missing from `document.pages`
+ * - returns `undefined` when `page_no` or coordinate is not a finite number, or page is missing from `document.pages`
  */
 export function toPageImageBox(
     document: DoclingDocument,
-    prov: Pick<ProvenanceItem, 'page_no' | 'bbox'>,
+    prov: { page_no: number; bbox?: BoundingBox | null },
 ): PageImageBox | undefined {
     const pageNo = prov?.page_no;
     if (!isFiniteNumber(pageNo)) {

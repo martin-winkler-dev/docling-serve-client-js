@@ -14,6 +14,7 @@ assert.equal(toPageImageBox({ pages: {} }, { page_no: 1, bbox: { l: 0, t: 0, r: 
 assert.equal(typeof createDoclingClient, 'function');
 const client = createDoclingClient({ baseUrl: 'http://127.0.0.1:1' });
 assert.deepEqual(Object.keys(client).sort(), [
+    'capabilities',
     'check',
     'convertDocument',
     'convertMarkdown',
@@ -24,6 +25,9 @@ const md = await client.convertMarkdown(new Uint8Array());
 assert.equal(md.ok || md.error.code, 'invalid_input');
 const doc = await client.convertDocument(new Uint8Array());
 assert.equal(doc.ok || doc.error.code, 'invalid_input');
+const caps = await client.capabilities();
+assert.equal(caps.ok || caps.error.code, 'network');
+await assert.rejects(client.capabilities({ unknownOption: true }), TypeError);
 await assert.rejects(client.convertMarkdown(new Uint8Array(), { unknownOption: true }), TypeError);
 await assert.rejects(client.convertMarkdown(new Uint8Array(), { images: 'extract' }), TypeError);
 await assert.rejects(client.convertDocument(new Uint8Array(), { images: 'extract' }), TypeError);

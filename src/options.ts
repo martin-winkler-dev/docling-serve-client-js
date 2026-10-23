@@ -19,7 +19,7 @@ import type {
     DocumentImageMode,
     DocumentOptions,
     ImageOptions,
-    Job,
+    JobRef,
     MarkdownImageMode,
     MarkdownJobOutput,
     MarkdownOptions,
@@ -89,6 +89,7 @@ export const DEFAULT_OPTIONS: Readonly<ResolvedOptions> = Object.freeze({
     pdfBackend: 'docling_parse',
     ocr: true,
     forceOcr: false,
+    ocrEngine: 'auto',
 });
 
 /** Rules for docling options, accepted by the factory and every conversion call. */
@@ -101,6 +102,8 @@ const CALL_OPTION_RULES: Record<keyof DoclingOptions, OptionRule> = {
     pdfBackend: (value) => isOneOf(value, PDF_BACKENDS),
     ocr: isBoolean,
     forceOcr: isBoolean,
+    // Open list: presets depend on server installation, unknown IDs are left to server.
+    ocrEngine: (value) => typeof value === 'string' && value !== '',
 };
 
 /** Rules for factory options: per-call options plus the factory-only ones. */
@@ -133,7 +136,7 @@ const IMAGE_OPTION_RULES: Record<keyof ImageOptions, OptionRule> = {
     omitSmall: isBoolean,
 };
 
-/** Rules for `check` options. */
+/** Rules for `check` and `capabilities` options. */
 const CHECK_RULES: Record<keyof CallOptions, OptionRule> = {
     signal: isAbortSignal,
 };
@@ -196,7 +199,10 @@ export function resolveConfig(config: unknown): ResolvedConfig {
     };
 }
 
-/** Validates md call options over factory defaults; throws TypeError on invalid options. */
+/**
+ * Validates md call options over factory defaults.
+ * @throws `TypeError` on invalid options.
+ */
 export function resolveMarkdownCall(defaults: Readonly<ResolvedOptions>, options: unknown): MarkdownCall {
     const {
         signal,
@@ -208,7 +214,10 @@ export function resolveMarkdownCall(defaults: Readonly<ResolvedOptions>, options
     return { options: { ...defaults, ...docling }, output, ...(signal === undefined ? {} : { signal }) };
 }
 
-/** Validates document call options over factory defaults; throws TypeError on invalid options. */
+/**
+ * Validates document call options over factory defaults.
+ * @throws `TypeError` on invalid options.
+ */
 export function resolveDocumentCall(defaults: Readonly<ResolvedOptions>, options: unknown): DocumentCall {
     const {
         signal,
@@ -219,7 +228,10 @@ export function resolveDocumentCall(defaults: Readonly<ResolvedOptions>, options
     return { options: { ...defaults, ...docling }, images, pageImages, ...(signal === undefined ? {} : { signal }) };
 }
 
-/** Validates `check` call options (signal only); throws TypeError on invalid options. */
+/**
+ * Validates signal-only call options (`check`, `capabilities`).
+ * @throws `TypeError` on invalid options.
+ */
 export function resolveCheckOptions(options: unknown): CallOptions {
     return validateKeys<CallOptions>(callObject(options), CHECK_RULES);
 }
@@ -228,8 +240,9 @@ export function resolveCheckOptions(options: unknown): CallOptions {
  * **Checks a job object against the shape `submitMarkdown()` and `submitDocument()` return**.
  *
  * - never throws: a malformed job is `invalid_input`
+ * - `settings` and other extra keys are ignored and not returned
  */
-export function validateJob(job: unknown): Result<Job> {
+export function validateJob(job: unknown): Result<JobRef> {
     if (!isPlainObject(job) || !isJobId(job.id)) {
         return fail(ERR.INVALID_INPUT(INVALID_JOB));
     }
@@ -259,7 +272,10 @@ export function isJobId(value: unknown): value is string {
 // --- 4. Internal Functions
 // -------------------------------------------------------------------
 
-/** Returns call options as a plain object (`undefined` becomes `{}`); throws TypeError otherwise. */
+/**
+ * Returns call options as a plain object (`undefined` becomes `{}`).
+ * @throws `TypeError` when options is not a plain object.
+ */
 function callObject(options: unknown): Record<string, unknown> {
     if (options === undefined) {
         return {};

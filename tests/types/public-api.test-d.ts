@@ -5,6 +5,10 @@
 import { expectTypeOf } from 'bun:test';
 import {
     type AnyTextItem,
+    type CallOptions,
+    type CapabilityLimits,
+    type CapabilityPreset,
+    type CapabilityStage,
     type ClientOptions,
     type ConversionFailure,
     type ConvertedDocument,
@@ -13,6 +17,7 @@ import {
     type DoclingClient,
     type DoclingDocument,
     type DoclingOptions,
+    type DoclingSettings,
     type DocumentImageMode,
     type DocumentJob,
     type DocumentWarning,
@@ -23,10 +28,12 @@ import {
     type ImageWarning,
     isSmallImage,
     type Job,
+    type JobRef,
     type JobState,
     type MarkdownImageMode,
     type MarkdownJob,
     type MarkdownWarning,
+    type OcrEngine,
     PAGE_IMAGE_SCALE,
     type PageImage,
     type PageImageBox,
@@ -37,10 +44,12 @@ import {
     type ProvenanceItem,
     type Result,
     readPngSize,
+    type ServerCapabilities,
     type ServerDetails,
     type ServerVersions,
     type ServerWarning,
     toPageImageBox,
+    type WithSettings,
 } from '../../src/index.js';
 
 declare const client: DoclingClient;
@@ -122,27 +131,50 @@ if (documentWarning.code === 'page_image_not_decoded') {
 
 // --- Calls resolve to the matching Result.
 
-expectTypeOf(client.convertMarkdown(pdf)).resolves.toEqualTypeOf<Result<ConvertedMarkdown>>();
-expectTypeOf(client.convertDocument(pdf)).resolves.toEqualTypeOf<Result<ConvertedDocument>>();
+expectTypeOf(client.convertMarkdown(pdf)).resolves.toEqualTypeOf<Result<WithSettings<ConvertedMarkdown>>>();
+expectTypeOf(client.convertDocument(pdf)).resolves.toEqualTypeOf<Result<WithSettings<ConvertedDocument>>>();
 expectTypeOf(client.submitMarkdown(pdf)).resolves.toEqualTypeOf<Result<MarkdownJob>>();
 expectTypeOf(client.submitDocument(pdf)).resolves.toEqualTypeOf<Result<DocumentJob>>();
+expectTypeOf(client.capabilities()).resolves.toEqualTypeOf<Result<ServerCapabilities>>();
+expectTypeOf(client.capabilities({ signal: AbortSignal.timeout(1000) })).resolves.toEqualTypeOf<
+    Result<ServerCapabilities>
+>();
+// @ts-expect-error capabilities() takes only CallOptions
+client.capabilities({ ocr: false });
 
-// --- check() is overloaded per job kind.
+declare const capabilities: ServerCapabilities;
+expectTypeOf(capabilities.versions).toEqualTypeOf<ServerVersions>();
+expectTypeOf(capabilities.stages).toEqualTypeOf<Record<string, CapabilityStage>>();
+expectTypeOf(capabilities.stages.ocr!.presets[0]!).toEqualTypeOf<CapabilityPreset>();
+expectTypeOf(capabilities.limits).toEqualTypeOf<CapabilityLimits>();
+expectTypeOf(capabilities.features.websocket).toBeBoolean();
 
+declare const settings: DoclingSettings;
+expectTypeOf(settings.fromFormats).toEqualTypeOf<'pdf' | 'image'>();
+expectTypeOf(settings.toFormats).toEqualTypeOf<'md' | 'json'>();
+expectTypeOf(settings.mdCompactTables).toEqualTypeOf<boolean | null>();
+expectTypeOf(settings.pageRange).toEqualTypeOf<[from: number, to: number] | null>();
+
+// --- check() is overloaded per job kind; settings on the job are optional for check().
+
+declare const jobRef: JobRef;
 expectTypeOf(client.check(markdownJob)).resolves.toEqualTypeOf<Result<JobState<ConvertedMarkdown>>>();
 expectTypeOf(client.check(documentJob)).resolves.toEqualTypeOf<Result<JobState<ConvertedDocument>>>();
 expectTypeOf(client.check(job)).resolves.toEqualTypeOf<Result<JobState<ConvertedMarkdown | ConvertedDocument>>>();
-// a literal job object picks the overload by its `kind`
+expectTypeOf(client.check(jobRef)).resolves.toEqualTypeOf<Result<JobState<ConvertedMarkdown | ConvertedDocument>>>();
+// a literal job object without settings picks the overload by its `kind`
 expectTypeOf(client.check({ kind: 'document', id: 'x' })).resolves.toEqualTypeOf<Result<JobState<ConvertedDocument>>>();
 expectTypeOf(client.check({ kind: 'markdown', id: 'x', output: { images: 'none' } })).resolves.toEqualTypeOf<
     Result<JobState<ConvertedMarkdown>>
 >();
 
-// `status` narrows the job state: the result only once done, position only while queued.
+// `status` narrows the job state: the result only once done, position only while queued; done has no settings.
 declare const state: JobState<ConvertedMarkdown>;
 if (state.status === 'done') {
     expectTypeOf(state.markdown).toBeString();
     expectTypeOf(state.images).toEqualTypeOf<ExtractedImage[]>();
+    // @ts-expect-error check() done state carries no settings (they are on the job)
+    state.settings;
 }
 if (state.status === 'queued') {
     expectTypeOf(state.position).toEqualTypeOf<number | null>();
@@ -158,6 +190,7 @@ if (documentState.status === 'done') {
 
 if (job.kind === 'markdown') {
     expectTypeOf(job).toEqualTypeOf<MarkdownJob>();
+    expectTypeOf(job.settings).toEqualTypeOf<DoclingSettings>();
     if (job.output.images === 'extract') {
         expectTypeOf(job.output.imageOptions.prefix).toBeString();
         expectTypeOf(job.output.imageOptions.omitSmall).toBeBoolean();
@@ -167,6 +200,7 @@ if (job.kind === 'markdown') {
     }
 } else {
     expectTypeOf(job).toEqualTypeOf<DocumentJob>();
+    expectTypeOf(job.settings).toEqualTypeOf<DoclingSettings>();
     // @ts-expect-error document jobs have no md output
     job.output;
 }
@@ -183,6 +217,12 @@ expectTypeOf<Pipeline>().toEqualTypeOf<'standard' | 'vlm'>();
 expectTypeOf<PdfBackend>().toEqualTypeOf<'docling_parse' | 'pypdfium2'>();
 expectTypeOf<MarkdownImageMode>().toEqualTypeOf<'none' | 'placeholder' | 'extract'>();
 expectTypeOf<DocumentImageMode>().toEqualTypeOf<'embedded' | 'placeholder'>();
+expectTypeOf<CallOptions>().toEqualTypeOf<{ signal?: AbortSignal }>();
+/** Known engines and custom engine strings both satisfy OcrEngine. */
+const knownEngine: OcrEngine = 'rapidocr';
+const customEngine: OcrEngine = 'custom-ocr-v3';
+expectTypeOf(knownEngine).toExtend<OcrEngine>();
+expectTypeOf(customEngine).toExtend<OcrEngine>();
 
 client.convertMarkdown(pdf, {
     headingHierarchy: false,
@@ -193,8 +233,12 @@ client.convertMarkdown(pdf, {
     pdfBackend: 'pypdfium2',
     ocr: false,
     forceOcr: true,
+    ocrEngine: 'easyocr',
     signal: AbortSignal.timeout(1000),
 });
+client.convertDocument(pdf, { ocrEngine: 'nemotron-ocr' });
+// @ts-expect-error ocrEngine must be a string
+client.convertMarkdown(pdf, { ocrEngine: 123 });
 createDoclingClient({
     baseUrl: '',
     options: { ocr: false, ocrLang: ['de', 'en'], pageRange: [1, 3], documentTimeout: 60 },
@@ -266,6 +310,7 @@ isSmallImage(extracted);
 isSmallImage({ width: 1 });
 
 expectTypeOf(toPageImageBox).toBeFunction();
+declare const document: DoclingDocument;
 declare const provenance: ProvenanceItem;
 expectTypeOf(toPageImageBox(document, provenance)).toEqualTypeOf<PageImageBox | undefined>();
 declare const pageBox: PageImageBox;
@@ -277,7 +322,6 @@ expectTypeOf(pageBox.height).toBeNumber();
 
 // --- DoclingDocument: `label` narrows text items.
 
-declare const document: DoclingDocument;
 const text = document.texts[0]!;
 expectTypeOf(text).toEqualTypeOf<AnyTextItem>();
 expectTypeOf(text.text).toBeString();

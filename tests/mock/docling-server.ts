@@ -121,6 +121,77 @@ export const MOCK_VERSIONS = {
     plaform: 'Mock-OS',
 };
 
+/** What the mock answers on `GET /v1/capabilities`, a trimmed copy of docling-serve 1.36's payload. */
+export const MOCK_CAPABILITIES = {
+    versions: { 'docling-serve': '1.36.0', docling: '2.140.0', 'docling-parse': '7.22.2' },
+    stages: {
+        ocr: {
+            option: 'ocr_preset',
+            custom_config_option: null,
+            default: 'auto',
+            presets: [
+                { id: 'auto', name: 'auto', description: null, source: 'docling' },
+                { id: 'easyocr', name: 'easyocr', description: null, source: 'docling' },
+                { id: 'rapidocr', name: 'rapidocr', description: null, source: 'docling' },
+                { id: 'tesseract', name: 'tesseract', description: null, source: 'docling' },
+            ],
+        },
+        table_structure: {
+            option: 'table_structure_preset',
+            custom_config_option: null,
+            default: 'tableformer_v1_accurate',
+            presets: [
+                {
+                    id: 'tableformer_v1_accurate',
+                    name: 'tableformer_v1_accurate',
+                    description: null,
+                    source: 'docling',
+                },
+                { id: 'tableformer_v2', name: 'tableformer_v2', description: null, source: 'docling' },
+            ],
+        },
+        vlm_pipeline: {
+            option: 'vlm_pipeline_preset',
+            custom_config_option: null,
+            default: 'granite_docling',
+            presets: [
+                { id: 'default', name: 'Server default (granite_docling)', description: null, source: 'default' },
+                {
+                    id: 'granite_docling',
+                    name: 'Granite-Docling',
+                    description: 'IBM Granite DocTags model for document conversion (258M parameters)',
+                    source: 'docling',
+                },
+            ],
+        },
+        chart_extraction: {
+            option: 'chart_extraction_preset',
+            custom_config_option: null,
+            default: 'granite_vision_v4',
+            presets: [
+                {
+                    id: 'granite_vision_v4',
+                    name: 'Granite-Vision-4.1-4B',
+                    description: 'IBM Granite Vision 4.1-4B chart extraction model (CSV, code, and summary output)',
+                    source: 'docling',
+                },
+            ],
+        },
+    },
+    sources: ['file', 'http', 's3'],
+    targets: { allowed: ['inbody', 'put', 's3', 'zip'], default: 'inbody' },
+    output_formats: ['md', 'json', 'yaml', 'html', 'text', 'doctags'],
+    image_export_modes: ['embedded', 'placeholder', 'referenced'],
+    limits: {
+        max_document_timeout: 604800.0,
+        max_images_scale: 2.0,
+        max_sources_per_request: 3,
+        max_num_pages: null,
+        max_file_size: null,
+    },
+    features: { api_key_required: false, artifact_storage: false, websocket: true },
+};
+
 /** Polls until a task is done: 1st poll `pending`, 2nd `started`, 3rd and later the final status. */
 export const POLLS_UNTIL_DONE = 3;
 
@@ -145,6 +216,10 @@ const BOOLEAN_FIELDS = [
     'do_chart_extraction',
     'do_ocr',
     'force_ocr',
+    'table_cell_matching',
+    'do_picture_classification',
+    'do_picture_description',
+    'abort_on_error',
 ];
 
 /** Form fields validated as enums, with docling-serve's allowed values. */
@@ -170,7 +245,8 @@ const MATCH_INTEGER = /^\d+$/;
 /**
  * **Fake docling-serve answering through `fetch`**.
  *
- * - routes: `/health`, `/version`, `/v1/convert/file`, `/v1/convert/file/async`, `/v1/status/poll/:id`, `/v1/result/:id`
+ * - routes: `/health`, `/version`, `/v1/capabilities`, `/v1/convert/file`, `/v1/convert/file/async`,
+ *   `/v1/status/poll/:id`, `/v1/result/:id`
  * - 401 without the configured api key (health and version stay open), 422 on invalid form fields
  * - an aborted request signal rejects like `fetch`; `failNext` answers take precedence over every route
  */
@@ -215,6 +291,9 @@ export function createMockDoclingServer(options: MockServerOptions = {}): MockDo
         }
         if (options.apiKey !== undefined && request.headers.get('X-Api-Key') !== options.apiKey) {
             return Response.json({ detail: 'Invalid API key' }, { status: 401 });
+        }
+        if (request.method === 'GET' && path === '/v1/capabilities') {
+            return Response.json(MOCK_CAPABILITIES);
         }
         if (form && (path === '/v1/convert/file' || path === '/v1/convert/file/async')) {
             const invalid = validateForm(form);

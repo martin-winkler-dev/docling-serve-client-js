@@ -103,7 +103,10 @@ export type ServerVersions = Record<string, string>;
  */
 export type ConvertInput = Uint8Array;
 
-/** @deprecated Use `ConvertInput`; images are accepted as well. */
+/**
+ * Use `ConvertInput`; images are accepted as well.
+ * @deprecated
+ */
 export type PdfInput = ConvertInput;
 
 /** Supported conversion pipeline backend. */
@@ -111,6 +114,14 @@ export type Pipeline = 'standard' | 'vlm';
 
 /** PDF text extraction backend used by docling. */
 export type PdfBackend = 'docling_parse' | 'pypdfium2';
+
+/**
+ * **OCR engine preset sent as `ocr_preset`**.
+ *
+ * - known engines autocomplete; any other non-empty preset id is accepted and sent as is
+ * - installed engines: `stages.ocr.presets` of `client.capabilities()`
+ */
+export type OcrEngine = 'auto' | 'rapidocr' | 'easyocr' | 'tesseract' | 'tesserocr' | 'ocrmac' | (string & {});
 
 /** docling conversion options; set as factory defaults and/or per call. */
 export type DoclingOptions = {
@@ -138,6 +149,8 @@ export type DoclingOptions = {
      * - ignored for image input: it has no text layer, and full-page OCR there merges words (`stepsand`)
      */
     forceOcr?: boolean;
+    /** OCR engine preset (`ocr_preset`); an engine the server lacks fails the conversion. Default `'auto'`. */
+    ocrEngine?: OcrEngine;
 };
 
 /** docling options of the factory: every per-call option plus the factory-only ones, applied to every call. */
@@ -305,6 +318,52 @@ export type ConvertedDocument = {
     versions: ServerVersions | null;
 };
 
+/**
+ * **Conversion settings exactly as sent in the multipart request**.
+ *
+ * - every key is the camelCase name of a docling-serve form field (`ocrPreset` = `ocr_preset`)
+ * - `null`: field not sent (md-only fields of json output, unused presets, unset factory options)
+ * - `ocrLang`: empty means not sent, i.e. engine default
+ * - server-side configuration not covered by request fields (e.g. layout model) is not included
+ */
+export type DoclingSettings = {
+    fromFormats: 'pdf' | 'image';
+    toFormats: 'md' | 'json';
+    imageExportMode: 'embedded' | 'placeholder';
+    includeImages: boolean;
+    includePageImages: boolean;
+    imagesScale: number;
+    mdCompactTables: boolean | null;
+    mdPageBreakPlaceholder: string | null;
+    doOcr: boolean;
+    forceOcr: boolean;
+    ocrPreset: string;
+    ocrLang: string[];
+    pdfBackend: PdfBackend;
+    pipeline: Pipeline;
+    vlmPipelinePreset: string | null;
+    doTableStructure: boolean;
+    tableMode: 'accurate';
+    tableStructurePreset: string;
+    tableCellMatching: boolean;
+    doPdfHeadingHierarchy: boolean;
+    doFormulaEnrichment: boolean;
+    doCodeEnrichment: boolean;
+    codeFormulaPreset: string | null;
+    doChartExtraction: boolean;
+    chartExtractionPreset: string | null;
+    doPictureClassification: boolean;
+    doPictureDescription: boolean;
+    pageRange: [from: number, to: number] | null;
+    documentTimeout: number | null;
+    abortOnError: boolean;
+};
+
+/** Sync conversion result plus the settings sent with its request. */
+export type WithSettings<T> = T & {
+    settings: DoclingSettings;
+};
+
 // -------------------------------------------------------------------
 // --- 4. Asynchronous Jobs
 // -------------------------------------------------------------------
@@ -320,6 +379,8 @@ export type MarkdownJob = {
     /** Server-side task id. */
     id: string;
     output: MarkdownJobOutput;
+    /** Settings sent with the submission; `check()` neither needs nor returns them. */
+    settings: DoclingSettings;
 };
 
 /** Handle of a document conversion, returned by `submitDocument()`; plain JSON, safe to store. */
@@ -327,10 +388,15 @@ export type DocumentJob = {
     kind: 'document';
     /** Server-side task id. */
     id: string;
+    /** Settings sent with the submission; `check()` neither needs nor returns them. */
+    settings: DoclingSettings;
 };
 
-/** Any job handle accepted by `check()`. */
+/** Any job handle returned by `submit*()`. */
 export type Job = MarkdownJob | DocumentJob;
+
+/** Job handle accepted by `check()`; `settings` may be dropped when storing the job. */
+export type JobRef = Omit<MarkdownJob, 'settings'> | Omit<DocumentJob, 'settings'>;
 
 /** State of an async job; `done` carries the conversion result. */
 export type JobState<T> =
@@ -342,7 +408,64 @@ export type JobState<T> =
     | ({ status: 'done' } & T);
 
 // -------------------------------------------------------------------
-// --- 5. Client
+// --- 5. Server Capabilities
+// -------------------------------------------------------------------
+
+/** Model or engine preset a pipeline stage offers; `id` is the value of the stage's form field. */
+export type CapabilityPreset = {
+    id: string;
+    name: string;
+    description: string | null;
+    /** Origin, e.g. `'docling'` or `'default'` (server default alias). */
+    source: string;
+};
+
+/** Pipeline stage (OCR, table structure, VLM, ...) with its form field and installed presets. */
+export type CapabilityStage = {
+    /** Form field selecting the preset, e.g. `'ocr_preset'`. */
+    option: string;
+    customConfigOption: string | null;
+    /** Preset used when the field is not sent. */
+    default: string;
+    presets: CapabilityPreset[];
+};
+
+/** Server limits; `null` means unlimited or not reported. */
+export type CapabilityLimits = {
+    maxDocumentTimeout: number | null;
+    maxImagesScale: number | null;
+    maxSourcesPerRequest: number | null;
+    maxNumPages: number | null;
+    maxFileSize: number | null;
+};
+
+/**
+ * **What the docling-serve instance offers (`GET /v1/capabilities`)**.
+ *
+ * - snake_case keys of the server payload converted to camelCase; `stages` keys stay as sent (e.g. `table_structure`)
+ * - missing or mistyped fields become empty lists, `''`, `null` or `false`
+ * - diagnostics only: conversions never query it
+ */
+export type ServerCapabilities = {
+    versions: ServerVersions;
+    stages: Record<string, CapabilityStage>;
+    sources: string[];
+    targets: {
+        allowed: string[];
+        default: string;
+    };
+    outputFormats: string[];
+    imageExportModes: string[];
+    limits: CapabilityLimits;
+    features: {
+        apiKeyRequired: boolean;
+        artifactStorage: boolean;
+        websocket: boolean;
+    };
+};
+
+// -------------------------------------------------------------------
+// --- 6. Client
 // -------------------------------------------------------------------
 
 /** Configuration passed to `createDoclingClient`. */
@@ -367,12 +490,12 @@ export type DoclingConfig = {
  */
 export type DoclingClient = {
     /** PDF or image to docling's md; images as placeholders, removed or extracted. */
-    convertMarkdown(input: ConvertInput, options?: MarkdownOptions): Promise<Result<ConvertedMarkdown>>;
+    convertMarkdown(input: ConvertInput, options?: MarkdownOptions): Promise<Result<WithSettings<ConvertedMarkdown>>>;
     /** PDF or image to docling's DoclingDocument. */
-    convertDocument(input: ConvertInput, options?: DocumentOptions): Promise<Result<ConvertedDocument>>;
-    /** Starts an async md conversion. */
+    convertDocument(input: ConvertInput, options?: DocumentOptions): Promise<Result<WithSettings<ConvertedDocument>>>;
+    /** Starts an async md conversion; the job carries the sent settings. */
     submitMarkdown(input: ConvertInput, options?: MarkdownOptions): Promise<Result<MarkdownJob>>;
-    /** Starts an async document conversion. */
+    /** Starts an async document conversion; the job carries the sent settings. */
     submitDocument(input: ConvertInput, options?: DocumentOptions): Promise<Result<DocumentJob>>;
     /**
      * **Polls a job; fetches its result once done**.
@@ -380,8 +503,11 @@ export type DoclingClient = {
      * - docling-serve deletes a result `DOCLING_SERVE_RESULT_REMOVAL_DELAY` seconds (default 300) after its first
      *   fetch: a `check` whose result download failed can be repeated within that time, later it returns
      *   `not_found`; persist `done` data, or start docling-serve with `DOCLING_SERVE_SINGLE_USE_RESULTS=false`
+     * - `done` carries no settings: they are on the job
      */
-    check(job: MarkdownJob, options?: CallOptions): Promise<Result<JobState<ConvertedMarkdown>>>;
-    check(job: DocumentJob, options?: CallOptions): Promise<Result<JobState<ConvertedDocument>>>;
-    check(job: Job, options?: CallOptions): Promise<Result<JobState<ConvertedMarkdown | ConvertedDocument>>>;
+    check(job: Omit<MarkdownJob, 'settings'>, options?: CallOptions): Promise<Result<JobState<ConvertedMarkdown>>>;
+    check(job: Omit<DocumentJob, 'settings'>, options?: CallOptions): Promise<Result<JobState<ConvertedDocument>>>;
+    check(job: JobRef, options?: CallOptions): Promise<Result<JobState<ConvertedMarkdown | ConvertedDocument>>>;
+    /** Installed presets, limits and features of the server; on demand only, never used by conversions. */
+    capabilities(options?: CallOptions): Promise<Result<ServerCapabilities>>;
 };

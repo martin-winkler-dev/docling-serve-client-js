@@ -3,6 +3,10 @@
 
 // Minimal image headers for tests: enough for size detection, not decodable pictures.
 
+// -------------------------------------------------------------------
+// --- 1. Exported Functions
+// -------------------------------------------------------------------
+
 /** PNG signature + IHDR (RGB, 8 bit) + IEND. CRCs are zero: nothing here checks them. */
 export function pngBytes(width: number, height: number): Uint8Array {
     const bytes = new Uint8Array(8 + 25 + 12);
@@ -18,6 +22,7 @@ export function pngBytes(width: number, height: number): Uint8Array {
     return bytes;
 }
 
+/** Encodes byte array as a base64 string. */
 export function toBase64(bytes: Uint8Array): string {
     return Buffer.from(bytes).toString('base64');
 }

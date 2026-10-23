@@ -20,14 +20,25 @@ import {
 } from '../../src/index.js';
 import { createSamplePdf, SAMPLE_TEXT } from './sample-pdf.js';
 
+/** True when live e2e tests against docling-serve are enabled. */
 const E2E = process.env.DOCLING_E2E === '1';
+
+/** Base URL of running docling-serve instance. */
 const BASE_URL = process.env.DOCLING_URL ?? 'http://127.0.0.1:5001';
+
+/** Maximum timeout in milliseconds for polling e2e jobs. */
 const TIMEOUT = 180_000;
+
+/** Link prefix for extracted images. */
 const PREFIX = 'out/images/1234-';
+
+/** Magic bytes of PNG signature header. */
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47];
+
 /** Start of picture data URIs with `images: 'embedded'`. */
 const PNG_DATA_URI = 'data:image/png;base64,';
 
+/** Shared docling client for e2e tests. */
 let docling: DoclingClient;
 /** Client limited to page 1 (`pageRange` is factory-only). */
 let firstPage: DoclingClient;
@@ -206,7 +217,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         'convertMarkdown: images placeholder marks pictures, none removes them',
         async () => {
             const placeholder = dataOf(await docling.convertMarkdown(imagePdf));
-            expect(placeholder.markdown.match(/<!-- image -->/g)).toHaveLength(2);
+            expect(placeholder.markdown.match(/<!-- image -->/g) ?? []).toHaveLength(2);
             expect(placeholder.markdown).not.toContain('base64');
             expect(placeholder.images).toEqual([]);
             const none = dataOf(await docling.convertMarkdown(imagePdf, { images: 'none' }));
@@ -325,11 +336,17 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         'submitMarkdown + check: placeholder and none apply when the result is picked up',
         async () => {
             const placeholder = dataOf(await waitForMarkdown(dataOf(await docling.submitMarkdown(imagePdf))));
-            expect(placeholder.status === 'done' && placeholder.markdown).toContain('<!-- image -->');
+            expect(placeholder.status).toBe('done');
+            if (placeholder.status === 'done') {
+                expect(placeholder.markdown).toContain('<!-- image -->');
+            }
             const none = dataOf(
                 await waitForMarkdown(dataOf(await docling.submitMarkdown(imagePdf, { images: 'none' }))),
             );
-            expect(none.status === 'done' && none.markdown).not.toContain('<!--');
+            expect(none.status).toBe('done');
+            if (none.status === 'done') {
+                expect(none.markdown).not.toContain('<!--');
+            }
         },
         TIMEOUT,
     );
@@ -338,7 +355,10 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         'submitDocument + check: embedded and placeholder pictures',
         async () => {
             const job = dataOf(await docling.submitDocument(imagePdf));
-            expect(job).toEqual({ kind: 'document', id: expect.any(String) });
+            // separate asserts: toMatchObject with an asymmetric matcher replaces the matched field in `job` (Bun 1.4)
+            expect(job.kind).toBe('document');
+            expect(job.id).toBeString();
+            expect(job.settings).toMatchObject({ fromFormats: 'pdf', toFormats: 'json', imageExportMode: 'embedded' });
             const embedded = dataOf(await waitForDocument(JSON.parse(JSON.stringify(job))));
             expect(embedded.status).toBe('done');
             if (embedded.status === 'done') {
@@ -350,9 +370,10 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
             const placeholder = dataOf(
                 await waitForDocument(dataOf(await docling.submitDocument(imagePdf, { images: 'placeholder' }))),
             );
-            expect(
-                placeholder.status === 'done' && placeholder.document.pictures.map((picture) => picture.image),
-            ).toEqual([null, null]);
+            expect(placeholder.status).toBe('done');
+            if (placeholder.status === 'done') {
+                expect(placeholder.document.pictures.map((picture) => picture.image)).toEqual([null, null]);
+            }
         },
         TIMEOUT,
     );
@@ -374,6 +395,14 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         expect(markdown.ok || markdown.error.code).toBe('not_found');
         const document = await docling.check({ kind: 'document', id: 'does-not-exist' });
         expect(document.ok || document.error.code).toBe('not_found');
+    });
+
+    test('capabilities: returns server versions, stages and features', async () => {
+        const capabilities = dataOf(await docling.capabilities());
+        expect(capabilities.versions['docling-serve']).toBeString();
+        expect(capabilities.stages.ocr?.option).toBe('ocr_preset');
+        expect(capabilities.stages.ocr?.presets.map((preset) => preset.id)).toContain('auto');
+        expect(capabilities.outputFormats).toEqual(expect.arrayContaining(['md', 'json']));
     });
 
     test('unreachable server -> network', async () => {

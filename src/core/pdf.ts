@@ -40,11 +40,11 @@ export function isPdf(bytes: unknown): bytes is Uint8Array {
 }
 
 /**
- * **Returns cross-reference offset if PDF is truncated**: last 'startxref' points at or past EOF.
+ * **Returns cross-reference offset if PDF is truncated**: last `startxref` points at or past EOF.
  *
  * - typical for aborted downloads; docling then fails with a vague load error
  * - only the last 2 KB are read, as latin1
- * - returns 'undefined' when offset lies inside file or no 'startxref' found
+ * - returns `undefined` when offset lies inside file or no `startxref` found
  */
 export function findTruncatedXref(bytes: Uint8Array): number | undefined {
     const tail = new TextDecoder('latin1').decode(bytes.subarray(Math.max(0, bytes.length - TAIL_LENGTH)));

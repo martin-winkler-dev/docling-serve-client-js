@@ -19,7 +19,14 @@ assert.equal(toPageImageBox({ pages: {} }, { page_no: 1, bbox: { l: 0, t: 0, r: 
 
 assert.equal(typeof createDoclingClient, 'function');
 const client = createDoclingClient({ baseUrl: 'http://127.0.0.1:1' });
-for (const name of ['convertMarkdown', 'convertDocument', 'submitMarkdown', 'submitDocument', 'check']) {
+for (const name of [
+    'convertMarkdown',
+    'convertDocument',
+    'submitMarkdown',
+    'submitDocument',
+    'check',
+    'capabilities',
+]) {
     assert.equal(typeof client[name], 'function');
 }
 assert.throws(() => createDoclingClient({ baseUrl: 'nope' }), TypeError);

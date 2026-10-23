@@ -8,6 +8,9 @@
 export type * from './document.js';
 export type {
     CallOptions,
+    CapabilityLimits,
+    CapabilityPreset,
+    CapabilityStage,
     ClientOptions,
     ConversionFailure,
     ConvertError,
@@ -17,6 +20,7 @@ export type {
     DoclingClient,
     DoclingConfig,
     DoclingOptions,
+    DoclingSettings,
     DocumentImageMode,
     DocumentJob,
     DocumentOptions,
@@ -27,12 +31,14 @@ export type {
     ImageSize,
     ImageWarning,
     Job,
+    JobRef,
     JobState,
     MarkdownImageMode,
     MarkdownJob,
     MarkdownJobOutput,
     MarkdownOptions,
     MarkdownWarning,
+    OcrEngine,
     PageImage,
     PageImageBox,
     PageImageWarning,
@@ -40,11 +46,13 @@ export type {
     PdfInput,
     Pipeline,
     Result,
+    ServerCapabilities,
     ServerDetails,
     ServerError,
     ServerVersions,
     ServerWarning,
     TaskFailure,
+    WithSettings,
 } from './types.js';
 
 // -------------------------------------------------------------------

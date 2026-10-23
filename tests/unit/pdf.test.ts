@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'bun:test';
 import { findTruncatedXref, isPdf } from '../../src/core/pdf.js';
 
+/** Generates minimal PDF bytes prefixed with `prefix`. */
 function pdfBytes(prefix = '') {
     return new TextEncoder().encode(`${prefix}%PDF-1.7\n...`);
 }

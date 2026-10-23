@@ -1,5 +1,5 @@
 {
-  "version": "0.4.0",
+  "version": "0.4.0", // smartin package version, not project version
   "eol": "LF",
   "license": {
     "copyright": {

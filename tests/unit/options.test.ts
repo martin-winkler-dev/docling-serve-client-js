@@ -12,7 +12,7 @@ import {
     resolveMarkdownCall,
     validateJob,
 } from '../../src/options.js';
-import type { Job, Result } from '../../src/types.js';
+import type { JobRef, Result } from '../../src/types.js';
 
 /** Image prefix used by the extract tests. */
 const PREFIX = 'out/images/1234-';
@@ -27,6 +27,7 @@ const CALL_OPTIONS: ResolvedOptions = {
     pdfBackend: 'pypdfium2',
     ocr: false,
     forceOcr: true,
+    ocrEngine: 'rapidocr',
 };
 
 /** Every docling option, factory-only ones included, with a non-default value. */
@@ -63,6 +64,9 @@ const INVALID_CALL_OPTIONS: Record<string, unknown>[] = [
     { pdfBackend: 'pdfium' },
     { pdfBackend: 'dlparse_v4' },
     { pdfBackend: 1 },
+    { ocrEngine: '' },
+    { ocrEngine: 1 },
+    { ocrEngine: null },
 ];
 
 /** Invalid values of factory-only options. */
@@ -128,6 +132,7 @@ describe('DEFAULT_OPTIONS', () => {
             pdfBackend: 'docling_parse',
             ocr: true,
             forceOcr: false,
+            ocrEngine: 'auto',
         });
         expect(Object.isFrozen(DEFAULT_OPTIONS)).toBe(true);
     });
@@ -144,8 +149,11 @@ describe('resolveConfig', () => {
         });
     });
 
-    test('accepts every docling option as factory default', () => {
+    test('accepts every docling option as factory default, including custom ocrEngine ids', () => {
         expect(resolveConfig({ baseUrl: 'http://x', options: ALL_OPTIONS }).defaults).toEqual(ALL_OPTIONS);
+        expect(resolveConfig({ baseUrl: 'http://x', options: { ocrEngine: 'nemotron-ocr' } }).defaults.ocrEngine).toBe(
+            'nemotron-ocr',
+        );
     });
 
     test('keeps a custom fetch and timeoutMs; undefined optional keys count as missing', () => {
@@ -503,15 +511,17 @@ describe('resolveCheckOptions', () => {
 });
 
 describe('validateJob', () => {
-    const extractJob: Job = {
+    /** Valid markdown job fixture with image extraction. */
+    const extractJob: JobRef = {
         kind: 'markdown',
         id: 'task-1',
         output: { images: 'extract', imageOptions: { prefix: PREFIX, omitSmall: false } },
     };
-    const documentJob: Job = { kind: 'document', id: '0b5e_c0de-42' };
+    /** Valid document job fixture. */
+    const documentJob: JobRef = { kind: 'document', id: '0b5e_c0de-42' };
 
     test('accepts both job kinds, also after a JSON round trip', () => {
-        const jobs: Job[] = [
+        const jobs: JobRef[] = [
             extractJob,
             documentJob,
             { kind: 'markdown', id: 't', output: { images: 'none' } },

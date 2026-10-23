@@ -33,10 +33,10 @@ type ImageSignature = {
 const IMAGE_SIGNATURES: readonly ImageSignature[] = [
     { mimeType: 'image/png', extension: 'png', parts: [[0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]]] },
     { mimeType: 'image/jpeg', extension: 'jpg', parts: [[0, [0xff, 0xd8, 0xff]]] },
-    // little-endian `II*\0` and big-endian `MM\0*`
+    // Little-endian `II*\0` and big-endian `MM\0*`.
     { mimeType: 'image/tiff', extension: 'tiff', parts: [[0, [0x49, 0x49, 0x2a, 0x00]]] },
     { mimeType: 'image/tiff', extension: 'tiff', parts: [[0, [0x4d, 0x4d, 0x00, 0x2a]]] },
-    // `RIFF` <size> `WEBP`
+    // `RIFF` <size> `WEBP`.
     {
         mimeType: 'image/webp',
         extension: 'webp',
@@ -59,7 +59,7 @@ const PDF_FORMAT: InputFormat = { fromFormat: 'pdf', mimeType: 'application/pdf'
  *
  * - image signatures must start at byte 0; PDF: `%PDF-` within the first 1024 bytes
  * - images are checked first, so an image whose data happens to contain `%PDF-` is still an image
- * @returns `undefined` for empty, non-`Uint8Array` or unrecognized input
+ * - returns `undefined` for empty, non-`Uint8Array` or unrecognized input
  */
 export function detectInputFormat(bytes: unknown): InputFormat | undefined {
     if (!(bytes instanceof Uint8Array) || bytes.length === 0) {

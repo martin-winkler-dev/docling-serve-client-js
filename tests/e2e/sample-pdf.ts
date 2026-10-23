@@ -4,6 +4,11 @@
 // Builds a small synthetic one-page PDF in memory: numbered headings, text, a bar chart picture and a small badge.
 import { deflateSync } from 'node:zlib';
 
+// -------------------------------------------------------------------
+// --- 1. Types
+// -------------------------------------------------------------------
+
+/** RGB pixel buffer of an uncompressed image. */
 type RgbImage = {
     width: number;
     height: number;
@@ -11,8 +16,14 @@ type RgbImage = {
     pixels: Uint8Array;
 };
 
+/** Red, green, and blue color channels (0-255). */
 type Rgb = [number, number, number];
 
+// -------------------------------------------------------------------
+// --- 2. Constants
+// -------------------------------------------------------------------
+
+/** Five distinct bar colors for the synthetic test chart. */
 const BAR_COLORS: Rgb[] = [
     [52, 101, 164],
     [204, 0, 0],
@@ -29,6 +40,11 @@ export const SAMPLE_TEXT = {
     results: '2 Results',
 };
 
+// -------------------------------------------------------------------
+// --- 3. Exported Functions
+// -------------------------------------------------------------------
+
+/** Builds a synthetic one-page PDF in memory with headings, text, and pictures. */
 export function createSamplePdf(): Uint8Array {
     const content = [
         text('F2', 22, 72, 740, SAMPLE_TEXT.title),
@@ -54,6 +70,10 @@ export function createSamplePdf(): Uint8Array {
         imageObject(badge(88, 32)),
     ]);
 }
+
+// -------------------------------------------------------------------
+// --- 4. Internal Functions
+// -------------------------------------------------------------------
 
 /** Joins the objects (numbered from 1) with a cross-reference table. */
 function buildPdf(objects: (string | Uint8Array)[]): Uint8Array {
@@ -83,21 +103,25 @@ function buildPdf(objects: (string | Uint8Array)[]): Uint8Array {
     return concat(parts);
 }
 
+/** Wraps stream data in a PDF stream object with length dictionary. */
 function stream(dictionary: string, data: Uint8Array): Uint8Array {
     const head = new TextEncoder().encode(`<< ${dictionary} /Length ${data.length} >>\nstream\n`);
     return concat([head, data, new TextEncoder().encode('\nendstream')]);
 }
 
+/** Generates a PDF image XObject dictionary and FlateDecode stream. */
 function imageObject({ width, height, pixels }: RgbImage): Uint8Array {
     const dictionary = `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode`;
     return stream(dictionary, deflateSync(pixels));
 }
 
+/** Generates a PDF text operator block positioned at (x, y). */
 function text(font: 'F1' | 'F2', size: number, x: number, y: number, value: string): string {
     const escaped = value.replace(/[\\()]/g, (char) => `\\${char}`);
     return `BT /${font} ${size} Tf ${x} ${y} Td (${escaped}) Tj ET`;
 }
 
+/** Generates a PDF image placement operator block at (x, y) with (width, height). */
 function image(name: string, x: number, y: number, width: number, height: number): string {
     return `q ${width} 0 0 ${height} ${x} ${y} cm /${name} Do Q`;
 }
@@ -120,6 +144,7 @@ function badge(width: number, height: number): RgbImage {
     return paint(width, height, (x) => (x < width / 3 ? [80, 80, 80] : [70, 150, 60]));
 }
 
+/** Renders an RGB image by calling `colorAt` for each pixel. */
 function paint(width: number, height: number, colorAt: (x: number, y: number) => Rgb): RgbImage {
     const pixels = new Uint8Array(width * height * 3);
     for (let y = 0; y < height; y++) {
@@ -130,10 +155,12 @@ function paint(width: number, height: number, colorAt: (x: number, y: number) =>
     return { width, height, pixels };
 }
 
+/** Encodes string to UTF-8 bytes or returns Uint8Array as is. */
 function toBytes(value: string | Uint8Array): Uint8Array {
     return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
+/** Concatenates multiple Uint8Array chunks into a single Uint8Array. */
 function concat(parts: Uint8Array[]): Uint8Array {
     const bytes = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
     let offset = 0;

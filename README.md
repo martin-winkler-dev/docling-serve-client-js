@@ -15,20 +15,29 @@ bytes in, docling's Markdown or DoclingDocument JSON out**.
   docling's raw output, e.g. with `&amp;` entities, soft hyphens and dot leaders left in.
 - In-memory only: no file I/O, no streaming.
 - **Calls never throw on runtime failures.** Every call resolves to `{ ok: true, data } | { ok: false, error }`.
-  Two exceptions are programming errors: the factory throws a `TypeError` on an invalid config, and a call with an
-  invalid option throws a `TypeError` (the promise rejects) before it sends anything.
+  Two exceptions are programming errors: the factory throws a `TypeError` on invalid config, and any call with an
+  invalid option rejects with a `TypeError` before sending a request.
 - Sync (`convert*`) and async (`submit*` + `check`). No built-in polling, queueing or rate limiting.
 - Zero dependencies. ESM, works in Node ≥ 22.12 (also via `require()`) and Bun.
+
+## Installation
+
+```bash
+bun add docling-serve-client
+# or
+npm install docling-serve-client
+```
 
 ## Usage
 
 ```ts
+import { readFile } from 'node:fs/promises';
 import { createDoclingClient } from 'docling-serve-client';
 
 const docling = createDoclingClient({ baseUrl: 'http://127.0.0.1:5001' });
 
 // Input is always a Uint8Array (Node Buffer is one): a PDF, or a PNG, JPEG, TIFF or WebP image
-const pdf = await readFile('paper.pdf');                                  // node:fs/promises
+const pdf = await readFile('paper.pdf');
 // const pdf = await Bun.file('paper.pdf').bytes();                       // Bun
 // const pdf = new Uint8Array(await (await fetch(pdfUrl)).arrayBuffer()); // any download
 
@@ -49,23 +58,48 @@ if (doc.ok) {
 
 `submitMarkdown()` and `submitDocument()` return a plain JSON job object. Store all of it and pass it back to
 `check()`. A Markdown job carries its image handling, so `check()` works the same from another process or after a
-restart. `check()` returns the result type that matches the job's `kind`.
+restart. `check()` returns the result type that matches the job's `kind`. The job also carries the
+[conversion settings](#conversion-settings) of its submission; `check()` does not need them, so a stored job may omit
+`settings`, and the `done` state does not repeat them.
 
 ```ts
+import type { DocumentJob } from 'docling-serve-client';
+
 const job = await docling.submitDocument(pdf);
 if (!job.ok) return handle(job.error);
-await save(JSON.stringify(job.data)); // { kind: 'document', id }
+await save(JSON.stringify(job.data)); // { kind: 'document', id, settings }
 
-// later, as often as you like:
-const state = await docling.check(JSON.parse(await load()));
+// later, as often as you like (e.g. in a polling loop or another worker):
+const storedJob: DocumentJob = JSON.parse(await load());
+const state = await docling.check(storedJob);
 if (state.ok) {
     switch (state.data.status) {
-        case 'queued':  /* state.data.position */ break;
-        case 'running': break;
+        case 'queued':  console.log('Queue position:', state.data.position); break;
+        case 'running': console.log('Processing...'); break;
         case 'done':    use(state.data.document); break;
     }
+} else {
+    // state.error.code: 'not_found' (e.g. expired or unknown id), 'http', 'conversion_failed', etc.
+    console.error(state.error.code, state.error.message);
+}
+
+// In-process polling loop until done:
+while (true) {
+    const poll = await docling.check(storedJob);
+    if (!poll.ok) {
+        console.error('Job error:', poll.error.code, poll.error.message);
+        break;
+    }
+    if (poll.data.status === 'done') {
+        use(poll.data.document);
+        break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 }
 ```
+
+For Markdown jobs (`submitMarkdown`), `check()` returns `JobState<ConvertedMarkdown>` whose `done` state provides
+`markdown`, `images`, `warnings`, and `versions`.
 
 docling-serve deletes a result `DOCLING_SERVE_RESULT_REMOVAL_DELAY` seconds (default 300) after its first fetch
 (`DOCLING_SERVE_SINGLE_USE_RESULTS=true`, the default). A `check()` whose result download failed (network error,
@@ -104,8 +138,9 @@ docling options (factory and per call):
 | `pdfBackend` | `'docling_parse'` | text extractor; `'pypdfium2'` reads ligatures and word spaces better but misses page headers and footers |
 | `ocr` | `true` | OCR bitmap content of PDFs (scans, pictures); image input is always OCRed |
 | `forceOcr` | `false` | OCR whole PDF pages and drop their text layer, for PDFs with broken text; ignored for image input |
+| `ocrEngine` | `'auto'` | OCR engine preset (`ocr_preset`): `'auto'`, `'rapidocr'`, `'easyocr'`, `'tesseract'`, `'tesserocr'`, `'ocrmac'` or any other non-empty preset id; the server rejects an id it does not allow with `http` 422, see [server capabilities](#server-capabilities) |
 
-Factory only (`options` of `createDoclingClient`; per call they throw `Option "x" is not supported`). Use a second
+Factory only (`options` of `createDoclingClient`; per call they reject with `Option "x" is not supported`). Use a second
 client for other values:
 
 | option | default | effect |
@@ -114,13 +149,25 @@ client for other values:
 | `pageRange` | all pages | `[from, to]`, 1-based, inclusive |
 | `documentTimeout` | server default | server-side limit in seconds |
 
-Per call only: `signal` (cancels the request), `images`, for Markdown `imageOptions`, for documents `pageImages`.
+Per call only (not allowed in factory `options`, rejected with `Option "x" is not supported`):
+
+| option | calls | default | effect |
+|---|---|---|---|
+| `images` | `convertMarkdown`, `submitMarkdown` | `'placeholder'` | `'placeholder'`, `'none'`, or `'extract'` |
+| `imageOptions` | `convertMarkdown`, `submitMarkdown` | none | `{ prefix: string, omitSmall?: boolean }`; required with `images: 'extract'`, not allowed otherwise |
+| `images` | `convertDocument`, `submitDocument` | `'embedded'` | `'embedded'` or `'placeholder'` |
+| `pageImages` | `convertDocument`, `submitDocument` | `false` | renders pages as images, decoded in `pageImages` |
+| `signal` | all calls (`convert*`, `submit*`, `check`, `capabilities`) | none | `AbortSignal` to cancel the request |
+
 `timeoutMs` is a factory setting: it limits every request except `GET /version` and is combined with `signal`.
 
 Always on, not configurable: table structure with the accurate TableFormer model (`do_table_structure`,
-`table_mode: 'accurate'`), pictures and page images at 144 dpi (`images_scale=2`, exported as `PAGE_IMAGE_SCALE`)
-and, for Markdown, compact tables (`md_compact_tables`). The image scale does not affect OCR: docling OCRs at its own
-fixed 216 dpi.
+`table_mode: 'accurate'`, `table_structure_preset: 'tableformer_v1_accurate'`, `table_cell_matching`), pictures and
+page images at 144 dpi (`images_scale=2`, exported as `PAGE_IMAGE_SCALE`) and, for Markdown, compact tables
+(`md_compact_tables`) without page break placeholders (`md_page_break_placeholder`). The image scale does not affect
+OCR: docling OCRs at its own fixed 216 dpi. Model presets are pinned: `granite_docling` for `pipeline: 'vlm'`,
+`granite_vision_v4` for `chartExtraction`, `codeformulav2` for formula and code enrichment. Picture classification
+and description stay off.
 
 ### Input formats
 
@@ -154,6 +201,8 @@ client moves them out of the document: `document.pages[n].image` is always `null
 images come back decoded in `data.pageImages`, in page order:
 
 ```ts
+import { writeFile } from 'node:fs/promises';
+
 const res = await docling.convertDocument(pdf, { pageImages: true, images: 'placeholder' });
 if (res.ok) {
     await writeFile(`out/${docId}.json`, JSON.stringify(res.data.document)); // no page image data inside
@@ -176,16 +225,72 @@ onto its page image as `{ page, x, y, width, height }` in pixels with a top-left
 next to the page image file or to crop with:
 
 ```ts
+import { toPageImageBox } from 'docling-serve-client';
+
 for (const item of res.data.document.texts) {
     for (const prov of item.prov) {
-        const box = toPageImageBox(res.data.document, prov); // undefined if the page is missing
+        const box = toPageImageBox(res.data.document, prov); // undefined if coordinates or page missing
     }
 }
-// table cells carry their own bbox (top-left origin) and the page of their table:
-const box = toPageImageBox(document, { page_no: table.prov[0].page_no, bbox: cell.bbox });
+
+// table cells carry their own bbox (top-left origin) and belong to the page of their table:
+for (const table of res.data.document.tables) {
+    const pageNo = table.prov[0]?.page_no ?? 1;
+    for (const row of table.data.grid) {
+        for (const cell of row) {
+            if (cell.bbox) {
+                const box = toPageImageBox(res.data.document, { page_no: pageNo, bbox: cell.bbox });
+            }
+        }
+    }
+}
 ```
 
 The boxes fit page images of any conversion by this client, also when `pageImages` was off.
+
+### DoclingDocument structure
+
+`convertDocument()` returns the full JSON AST (`doc.data.document`) typed as `DoclingDocument`:
+
+- `texts`: array of text blocks (`label`, `text`, `orig`, `prov: [{ page_no, bbox, charspan }]`). Common labels include `'paragraph'`, `'section_header'`, `'title'`, `'list_item'`, `'code'`, `'formula'`, `'footnote'`, `'page_header'`, `'page_footer'`, `'caption'`. Section headers include heading `level`. List items include `enumerated` and `marker`. Code listings include `code_language`. Formulas contain LaTeX in `text` with `formulaEnrichment`. Note on `prov.charspan`: `[start, end)` span is in Python Unicode code points; slice in JS using `Array.from(item.text).slice(start, end).join('')`, not `item.text.slice(start, end)`.
+- `tables`: array of tables (`prov`, `data: { grid: TableCell[][], num_rows, num_cols }`). Cells contain `text`, `row_span`, `col_span`, `bbox`, `column_header`, and `row_header`.
+- `pictures`: array of figures with `captions`, `prov`, `image` (`ImageRef` with base64 data URI when `images: 'embedded'`, or `null` when `images: 'placeholder'`), and `annotations` (e.g. chart data when `chartExtraction` was enabled, classifications, descriptions).
+- `groups`: structural groupings (`(ListGroup | InlineGroup | GroupItem)[]`) such as lists, inline formatting runs, chapters, or form sections.
+- `key_value_items`: key-value regions extracted from forms or documents (`graph: { cells: GraphCell[], links: GraphLink[] }`).
+- `form_items`: form regions and form fields (`graph: { cells: GraphCell[], links: GraphLink[] }`).
+- `pages`: record of page metadata keyed by 1-based page number string (`"1"`, `"2"`, ...) with `size: { width, height }` in PDF points.
+- `body`: root group of content in reading order. Walk `body.children` (`{ $ref: string }` JSON pointers, e.g. `'#/texts/0'`) depth-first to follow the logical document flow.
+- `furniture`: root group of header, footer and page number items outside the body flow.
+
+#### Navigating the AST in reading order
+
+The root content in reading order is stored in `body.children`. Each child is a JSON pointer reference (e.g. `#/texts/0`, `#/tables/1`, `#/groups/2`). You can resolve references and walk the reading order like this:
+
+```ts
+import type { DoclingDocument } from 'docling-serve-client';
+
+// Resolving a JSON pointer reference (e.g. '#/texts/0'):
+function resolveRef(doc: DoclingDocument, ref: string) {
+    const [, collection, idx] = ref.split('/');
+    return (doc as Record<string, any>)[collection]?.[Number(idx)];
+}
+
+// Walking body items in logical reading order:
+function* walkReadingOrder(
+    doc: DoclingDocument,
+    node: { children: { $ref: string }[] } = doc.body,
+): Generator<any> {
+    for (const child of node.children) {
+        const item = resolveRef(doc, child.$ref);
+        if (!item) continue;
+        if ('children' in item && Array.isArray(item.children) && item.children.length > 0) {
+            yield* walkReadingOrder(doc, item);
+        } else {
+            yield item;
+        }
+    }
+}
+```
 
 ### Images in the Markdown
 
@@ -198,6 +303,8 @@ The boxes fit page images of any conversion by this client, also when `pageImage
 With `'extract'`, `imageOptions` is required on each call, because the prefix names one document's images:
 
 ```ts
+import { writeFile } from 'node:fs/promises';
+
 const res = await docling.convertMarkdown(pdf, {
     images: 'extract',
     imageOptions: { prefix: `images/${docId}-` }, // omitSmall: drop bullets, icons and small logos, default true
@@ -243,6 +350,51 @@ Store it with each converted document: the same PDF can convert differently unde
 versions once and keeps them; the request has its own 2 s limit, and when it fails `versions` is `null` and the next
 result asks again. Create a new client after a server update.
 
+### Conversion settings
+
+`convert*()` results (`data.settings`) and `submit*()` jobs (`job.settings`) carry the form fields the request sent,
+as a typed `DoclingSettings` object. The client sends an explicit value for every field it controls, also where it
+equals docling-serve's default, so the settings do not depend on the server's defaults. Store them with the versions
+to know how a document was converted.
+
+```ts
+const res = await docling.convertMarkdown(pdf, { ocrEngine: 'rapidocr' });
+if (res.ok) {
+    res.data.settings.ocrPreset;            // 'rapidocr'
+    res.data.settings.tableStructurePreset; // 'tableformer_v1_accurate'
+    res.data.settings.vlmPipelinePreset;    // null: pipeline is 'standard'
+}
+```
+
+- Each key is the camelCase name of a docling-serve form field (`ocrPreset` = `ocr_preset`).
+- `null` means the field was not sent: Markdown-only fields for document output, the preset of a disabled stage,
+  unset `pageRange` and `documentTimeout`. An empty `ocrLang` was not sent either (engine default).
+- Image input records what was sent: `doOcr: true` and `forceOcr: false`, whatever `ocr` and `forceOcr` say.
+- Server configuration that has no request field (e.g. the layout model) is not included; see
+  `stages.layout` of the [server capabilities](#server-capabilities).
+
+### Server capabilities
+
+`docling.capabilities()` asks `GET /v1/capabilities` for the presets, limits and features of the server. It is for
+diagnostics, e.g. to list the allowed `ocrEngine` ids; conversions never call it. It takes only `{ signal }`.
+
+```ts
+const caps = await docling.capabilities();
+if (caps.ok) {
+    caps.data.stages.ocr?.presets.map((preset) => preset.id); // ['auto', 'easyocr', 'rapidocr', 'tesseract', …]
+    caps.data.stages.table_structure?.default;                // 'tableformer_v1_accurate'
+    caps.data.limits.maxImagesScale;                          // 2, or null when unlimited
+    caps.data.features.apiKeyRequired;                        // false
+}
+```
+
+- The server's snake_case keys come back in camelCase; `stages` keys stay as the server sends them (`ocr`, `layout`,
+  `table_structure`, `vlm_pipeline`, `chart_extraction`, …). Each stage has `option` (its form field), `default` and
+  `presets` (`{ id, name, description, source }`).
+- Missing or mistyped fields become `[]`, `''`, `null` or `false`, so a newer or older payload does not fail the call.
+- An allowed preset is not always usable: e.g. `ocrmac` only runs on macOS.
+- An older server without the endpoint answers `http` with `status: 404`.
+
 ### Broken umlauts / special characters
 
 If the output shows `fŸhrt`, `Nu§baum`, `…sterreich`, the PDF's text layer uses an encoding docling-parse misreads
@@ -251,7 +403,18 @@ It is slower, so use it per document, not by default.
 
 ### Errors
 
-`error.code` is one of:
+All client calls resolve to a `Result<T>` union:
+- `{ ok: true, data: T }` on success
+- `{ ok: false, error: ConvertError }` on runtime failure
+
+#### Error fields
+
+Every `ConvertError` contains:
+- `code`: one of the `ErrorCode` values below
+- `message`: human-readable explanation of the failure
+- `status`: optional HTTP status code (present when the server answered, e.g. `400`, `404`, `422`, `500`)
+- `versions`: server versions captured from `GET /version` if the server answered, or `null`
+- `details`: `{ errors: ServerError[]; failure: TaskFailure | null }` (present only when `code === 'conversion_failed'`)
 
 | code | meaning |
 |---|---|
@@ -267,21 +430,99 @@ It is slower, so use it per document, not by default.
 `{ message, details }` (component, module, category, page); `failure` is docling's task classification
 `{ category, phase, retryable }` for async jobs, or `null`.
 
-## Development
+TypeScript narrows `error` on `error.code`:
 
-### Running docling-serve (CUDA)
-
-```bash
-# Install or reinstall docling-serve with CUDA 12.6
-uv tool install --reinstall --torch-backend cu126 docling-serve
-
-# Start the server on port 5001
-docling-serve run --port 5001
+```ts
+if (!res.ok) {
+    switch (res.error.code) {
+        case 'conversion_failed':
+            console.error('Conversion failed:', res.error.message);
+            console.error('Server error items:', res.error.details.errors);
+            console.error('Task failure:', res.error.details.failure);
+            break;
+        case 'http':
+            console.error(`HTTP error ${res.error.status}:`, res.error.message);
+            break;
+        case 'invalid_input':
+            console.error('Input rejected before request:', res.error.message);
+            break;
+        default:
+            console.error(res.error.code, res.error.message);
+    }
+}
 ```
 
+#### Programming errors vs runtime errors
+
+| Error Category | Trigger | Handling |
+|---|---|---|
+| **Runtime failure** | Server unreachable, invalid input file bytes, server HTTP 4xx/5xx, model/conversion failure, abort signal or request timeout | Resolves to `{ ok: false, error: ConvertError }` (never throws) |
+| **Programming error** | Invalid client config (malformed URL, invalid types), unsupported or mistyped call options, incompatible options (such as `imageOptions` without `images: 'extract'`) | Throws `TypeError` synchronously on factory; rejects with `TypeError` on async client calls before sending request |
+
+### Exported types, utilities & constants
+
+In addition to `createDoclingClient`, the package exports helper functions, constants, and TypeScript types:
+
+```ts
+import {
+    createDoclingClient,
+    toPageImageBox,
+    isSmallImage,
+    readPngSize,
+    PAGE_IMAGE_SCALE,
+    type DoclingClient,
+    type DoclingConfig,
+    type ClientOptions,
+    type DoclingOptions,
+    type MarkdownOptions,
+    type DocumentOptions,
+    type CallOptions,
+    type Result,
+    type ConvertError,
+    type ErrorCode,
+    type ConvertedMarkdown,
+    type ConvertedDocument,
+    type DoclingDocument,
+    type DocumentJob,
+    type MarkdownJob,
+    type Job,
+    type JobRef,
+    type JobState,
+    type DoclingSettings,
+    type ServerCapabilities,
+    type ExtractedImage,
+    type PageImage,
+    type PageImageBox,
+    type ImageSize,
+    type MarkdownWarning,
+    type DocumentWarning,
+    type ServerError,
+    type TaskFailure,
+} from 'docling-serve-client';
+```
+
+- `toPageImageBox(document, prov)`: maps a provenance item `{ page_no, bbox }` to `{ page, x, y, width, height }` in pixels with a top-left origin; returns `undefined` if the page is missing or coordinates are invalid.
+- `isSmallImage(size)`: returns `true` if pixel dimensions match the `omitSmall` filter (area < 15,000 px, long side < 200 px, or short side < 24 px).
+- `readPngSize(bytes)`: parses `{ width, height }` directly from a PNG's IHDR header; returns `undefined` if not a valid PNG.
+- `PAGE_IMAGE_SCALE`: constant `2` (144 dpi resolution used by docling page images and bounding box coordinates).
+
+## Running docling-serve
+
+The client connects to a running [docling-serve](https://github.com/docling-project/docling-serve) server:
+
 ```bash
-bun install
-bun runtest check -p tsconfig.test.json   # lint fixes, typecheck, lint, unit tests against a mock docling server
-bun run test:e2e                          # end-to-end tests against docling-serve on :5001; fail if it is down
-bun run check                             # lint, tests, build, smoke tests on the built package, package check
+# Install docling-serve (default / CPU)
+uv tool install docling-serve
+
+# Or with CUDA (check your driver with nvidia-smi; use matching PyTorch tag, e.g. cu124, cu126)
+uv tool install --torch-backend <cuda-tag> docling-serve
+
+# Or via Docker (CPU)
+docker run -p 5001:5001 quay.io/ds4sd/docling-serve
+
+# Or via Docker (NVIDIA GPU / CUDA)
+docker run --gpus all -p 5001:5001 quay.io/ds4sd/docling-serve
+
+# Start the local server (listens on http://127.0.0.1:5001 by default)
+docling-serve run
 ```

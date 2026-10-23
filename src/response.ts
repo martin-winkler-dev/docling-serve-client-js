@@ -212,7 +212,7 @@ function readServerError(error: DoclingErrorItem): ServerWarning[] {
     ];
 }
 
-/** docling `page_no`: integer >= 1; `0`, negatives and fractions are rejected. */
+/** Docling `page_no`: integer >= 1; 0, negatives and fractions are rejected. */
 function isPageNumber(value: unknown): value is number {
     return typeof value === 'number' && Number.isInteger(value) && value >= 1;
 }

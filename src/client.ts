@@ -1,6 +1,7 @@
 // Copyright 2026 Martin Winkler
 // SPDX-License-Identifier: Apache-2.0
 
+import { readCapabilities } from './capabilities.js';
 import { errorMessage, fetchJson } from './core/http.js';
 import { detectInputFormat, type InputFormat } from './core/input.js';
 import { findTruncatedXref } from './core/pdf.js';
@@ -23,12 +24,15 @@ import type {
     ConvertInput,
     DoclingClient,
     DoclingConfig,
+    DoclingSettings,
     DocumentJob,
-    Job,
+    JobRef,
     JobState,
     MarkdownJob,
     Result,
+    ServerCapabilities,
     ServerVersions,
+    WithSettings,
 } from './types.js';
 
 // -------------------------------------------------------------------
@@ -55,15 +59,30 @@ type FormatFields = {
     pageImages: boolean;
 };
 
+/** Parsed JSON answer of a conversion POST, with the settings its form was built from. */
+type Posted = {
+    body: unknown;
+    settings: DoclingSettings;
+};
+
 // -------------------------------------------------------------------
 // --- 2. Constants
 // -------------------------------------------------------------------
 
-/** Fixed conversion form fields sent with every request. */
-const FIXED_FORM_FIELDS: [name: string, value: string][] = [
-    ['do_table_structure', 'true'],
-    ['table_mode', 'accurate'],
-];
+/** Table structure model; pinned so the server's fallback preset cannot change table output. */
+const TABLE_STRUCTURE_PRESET = 'tableformer_v1_accurate';
+
+/** Model of `pipeline: 'vlm'`. */
+const VLM_PIPELINE_PRESET = 'granite_docling';
+
+/** Model of `chartExtraction`. */
+const CHART_EXTRACTION_PRESET = 'granite_vision_v4';
+
+/** Model of `formulaEnrichment` and `codeEnrichment`. */
+const CODE_FORMULA_PRESET = 'codeformulav2';
+
+/** Matches each upper-case letter of a camelCase settings key, for its snake_case form field name. */
+const MATCH_UPPER_CASE = /[A-Z]/g;
 
 /** Error message for missing, empty or unrecognized input bytes. */
 const INVALID_INPUT = 'Expected a non-empty PDF, PNG, JPEG, TIFF or WebP as Uint8Array';
@@ -106,18 +125,29 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
         submitMarkdown,
         submitDocument,
         check: check as DoclingClient['check'],
+        capabilities,
     };
 
     /** Converts PDF or image bytes to md in one request. */
-    async function convertMarkdown(input: ConvertInput, options?: unknown): Promise<Result<ConvertedMarkdown>> {
+    async function convertMarkdown(
+        input: ConvertInput,
+        options?: unknown,
+    ): Promise<Result<WithSettings<ConvertedMarkdown>>> {
         const call = resolveMarkdownCall(defaults, options);
         const fields: FormatFields = { format: 'md', embedImages: call.output.images === 'extract', pageImages: false };
         const res = await post('/v1/convert/file', input, call.options, fields, call.signal);
-        return res.ok ? withVersions(readMarkdown(res.data, call.output)) : res;
+        if (!res.ok) {
+            return res;
+        }
+        const converted = await withVersions<ConvertedMarkdown>(readMarkdown(res.data.body, call.output));
+        return converted.ok ? ok({ ...converted.data, settings: res.data.settings }) : converted;
     }
 
     /** Converts PDF or image bytes to a DoclingDocument in one request. */
-    async function convertDocument(input: ConvertInput, options?: unknown): Promise<Result<ConvertedDocument>> {
+    async function convertDocument(
+        input: ConvertInput,
+        options?: unknown,
+    ): Promise<Result<WithSettings<ConvertedDocument>>> {
         const call = resolveDocumentCall(defaults, options);
         const fields: FormatFields = {
             format: 'json',
@@ -125,15 +155,21 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
             pageImages: call.pageImages,
         };
         const res = await post('/v1/convert/file', input, call.options, fields, call.signal);
-        return res.ok ? withVersions(readDocument(res.data)) : res;
+        if (!res.ok) {
+            return res;
+        }
+        const converted = await withVersions<ConvertedDocument>(readDocument(res.data.body));
+        return converted.ok ? ok({ ...converted.data, settings: res.data.settings }) : converted;
     }
 
-    /** Starts an async md conversion; the job carries the image handling for `check`. */
+    /** Starts an async md conversion; the job carries the image handling for `check` and the sent settings. */
     async function submitMarkdown(input: ConvertInput, options?: unknown): Promise<Result<MarkdownJob>> {
         const call = resolveMarkdownCall(defaults, options);
         const fields: FormatFields = { format: 'md', embedImages: call.output.images === 'extract', pageImages: false };
-        const id = await submit(input, call.options, fields, call.signal);
-        return id.ok ? ok({ kind: 'markdown', id: id.data, output: call.output }) : id;
+        const task = await submit(input, call.options, fields, call.signal);
+        return task.ok
+            ? ok({ kind: 'markdown', id: task.data.id, output: call.output, settings: task.data.settings })
+            : task;
     }
 
     /** Starts an async document conversion; page images need no job field, `check` moves any it finds. */
@@ -144,8 +180,8 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
             embedImages: call.images === 'embedded',
             pageImages: call.pageImages,
         };
-        const id = await submit(input, call.options, fields, call.signal);
-        return id.ok ? ok({ kind: 'document', id: id.data }) : id;
+        const task = await submit(input, call.options, fields, call.signal);
+        return task.ok ? ok({ kind: 'document', id: task.data.id, settings: task.data.settings }) : task;
     }
 
     /**
@@ -156,7 +192,7 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
      *   `Result already fetched or expired`
      */
     async function check(
-        job: Job,
+        job: JobRef,
         options?: unknown,
     ): Promise<Result<JobState<ConvertedMarkdown | ConvertedDocument>>> {
         const { signal } = resolveCheckOptions(options);
@@ -209,18 +245,33 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
         }
     }
 
-    /** Posts the input to the async endpoint; resolves to the task id. */
+    /**
+     * **Queries `GET /v1/capabilities` on demand**.
+     *
+     * - older servers without the endpoint answer `http` (404)
+     */
+    async function capabilities(options?: unknown): Promise<Result<ServerCapabilities>> {
+        const { signal } = resolveCheckOptions(options);
+        const res = await get('/v1/capabilities', signal);
+        if (!res.ok) {
+            return failWithVersions(res.error);
+        }
+        const read = readCapabilities(res.data);
+        return read.ok ? read : failWithVersions(read.error);
+    }
+
+    /** Posts the input to the async endpoint; resolves to the task id and the sent settings. */
     async function submit(
         input: ConvertInput,
         options: ResolvedOptions,
         fields: FormatFields,
         signal: AbortSignal | undefined,
-    ): Promise<Result<string>> {
+    ): Promise<Result<{ id: string; settings: DoclingSettings }>> {
         const res = await post('/v1/convert/file/async', input, options, fields, signal);
         if (!res.ok) {
             return res;
         }
-        const id: unknown = (res.data as DoclingTaskStatus | null)?.task_id;
+        const id: unknown = (res.data.body as DoclingTaskStatus | null)?.task_id;
         if (readText(id) === undefined) {
             return failWithVersions(ERR.INVALID_RESPONSE('Response has no task_id'));
         }
@@ -228,7 +279,7 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
             const shown = JSON.stringify(id).slice(0, MAX_SHOWN_ID_LENGTH);
             return failWithVersions(ERR.INVALID_RESPONSE(`Response has an unusable task_id: ${shown}`));
         }
-        return ok(id);
+        return ok({ id, settings: res.data.settings });
     }
 
     /** Detects and checks the input format, then sends a multipart POST with timeout; errors already carry versions. */
@@ -238,14 +289,15 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
         options: ResolvedOptions,
         fields: FormatFields,
         signal: AbortSignal | undefined,
-    ): Promise<Result<unknown>> {
+    ): Promise<Result<Posted>> {
         const format = readInputFormat(input);
         if (!format.ok) {
             return format;
         }
+        const settings = buildSettings(format.data, options, fields);
         let body: FormData;
         try {
-            body = buildFormData(input, format.data, options, fields);
+            body = buildFormData(input, format.data, settings);
         } catch (error) {
             return fail(ERR.INVALID_INPUT(`Input could not be prepared for upload: ${errorMessage(error)}`));
         }
@@ -256,7 +308,7 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
             body,
             ...(limited === undefined ? {} : { signal: limited }),
         });
-        return res.ok ? res : failWithVersions(res.error);
+        return res.ok ? ok({ body: res.data, settings }) : failWithVersions(res.error);
     }
 
     /** GET request; `limit: false` skips `timeoutMs` (used by `/version`). */
@@ -354,60 +406,75 @@ function readInputFormat(input: unknown): Result<InputFormat> {
 }
 
 /**
- * **Builds the multipart body**: input file, fixed fields, output format and every docling option explicitly.
+ * **Every form field of a conversion request, as typed settings**.
  *
- * - input: `from_formats` (`pdf` or `image`) with a matching file name and MIME type
- * - md: `md_compact_tables=true`, no page break placeholder
+ * - md: `md_compact_tables=true`, empty page break placeholder; json sends neither
  * - images: `image_export_mode=embedded` when picture data or page images are requested, else `placeholder`;
  *   `include_images` and `include_page_images` pick which data docling sends
  * - `images_scale` fixed at `PAGE_IMAGE_SCALE`; it sets picture and page image resolution only, OCR has its own scale
  * - image input: OCR always on and never full-page, whatever `ocr` and `forceOcr` say
+ * - model presets pinned; a preset of a disabled stage is not sent
+ * - fields docling-serve would default silently are sent with that default
  */
-function buildFormData(
-    input: ConvertInput,
-    { fromFormat, mimeType, fileName }: InputFormat,
+function buildSettings(
+    { fromFormat }: InputFormat,
     options: ResolvedOptions,
     { format, embedImages, pageImages }: FormatFields,
-): FormData {
+): DoclingSettings {
+    // Image has no text layer: without OCR it yields no text, and full-page OCR merges words.
+    const isImage = fromFormat === 'image';
+    const isMarkdown = format === 'md';
+    return {
+        fromFormats: fromFormat,
+        toFormats: format,
+        imageExportMode: embedImages || pageImages ? 'embedded' : 'placeholder',
+        includeImages: embedImages,
+        includePageImages: pageImages,
+        imagesScale: PAGE_IMAGE_SCALE,
+        mdCompactTables: isMarkdown ? true : null,
+        mdPageBreakPlaceholder: isMarkdown ? '' : null,
+        doOcr: isImage || options.ocr,
+        forceOcr: !isImage && options.forceOcr,
+        ocrPreset: options.ocrEngine,
+        ocrLang: [...(options.ocrLang ?? [])],
+        pdfBackend: options.pdfBackend,
+        pipeline: options.pipeline,
+        vlmPipelinePreset: options.pipeline === 'vlm' ? VLM_PIPELINE_PRESET : null,
+        doTableStructure: true,
+        tableMode: 'accurate',
+        tableStructurePreset: TABLE_STRUCTURE_PRESET,
+        tableCellMatching: true,
+        doPdfHeadingHierarchy: options.headingHierarchy,
+        doFormulaEnrichment: options.formulaEnrichment,
+        doCodeEnrichment: options.codeEnrichment,
+        codeFormulaPreset: options.formulaEnrichment || options.codeEnrichment ? CODE_FORMULA_PRESET : null,
+        doChartExtraction: options.chartExtraction,
+        chartExtractionPreset: options.chartExtraction ? CHART_EXTRACTION_PRESET : null,
+        doPictureClassification: false,
+        doPictureDescription: false,
+        pageRange: options.pageRange === undefined ? null : [options.pageRange[0], options.pageRange[1]],
+        documentTimeout: options.documentTimeout ?? null,
+        abortOnError: false,
+    };
+}
+
+/**
+ * **Builds the multipart body from the settings, so sent fields and returned settings cannot differ**.
+ *
+ * - field name: settings key in snake_case (`ocrPreset` → `ocr_preset`)
+ * - `null` not sent; lists as repeated fields (empty list: not sent); booleans and numbers as strings
+ * - input: file name and MIME type matching `from_formats`
+ */
+function buildFormData(input: ConvertInput, { mimeType, fileName }: InputFormat, settings: DoclingSettings): FormData {
     const form = new FormData();
     // Blob does not accept SharedArrayBuffer-backed input: copy only that into a fresh ArrayBuffer.
     const bytes = input.buffer instanceof ArrayBuffer ? (input as Uint8Array<ArrayBuffer>) : new Uint8Array(input);
     form.append('files', new Blob([bytes], { type: mimeType }), fileName);
-    form.append('from_formats', fromFormat);
-    for (const [name, value] of FIXED_FORM_FIELDS) {
-        form.append(name, value);
-    }
-    form.append('to_formats', format);
-    if (format === 'md') {
-        form.append('md_compact_tables', 'true');
-    }
-    form.append('include_images', String(embedImages));
-    form.append('include_page_images', String(pageImages));
-    form.append('image_export_mode', embedImages || pageImages ? 'embedded' : 'placeholder');
-    form.append('images_scale', String(PAGE_IMAGE_SCALE));
-    form.append('do_pdf_heading_hierarchy', String(options.headingHierarchy));
-    form.append('do_formula_enrichment', String(options.formulaEnrichment));
-    form.append('do_code_enrichment', String(options.codeEnrichment));
-    if (options.formulaEnrichment || options.codeEnrichment) {
-        form.append('code_formula_preset', 'codeformulav2');
-    }
-    form.append('do_chart_extraction', String(options.chartExtraction));
-    form.append('pipeline', options.pipeline);
-    form.append('pdf_backend', options.pdfBackend);
-    // an image has no text layer: without OCR it yields no text, and full-page OCR merges its words
-    const isImage = fromFormat === 'image';
-    form.append('do_ocr', String(isImage || options.ocr));
-    form.append('force_ocr', String(!isImage && options.forceOcr));
-    // lists are sent as repeated fields
-    for (const lang of options.ocrLang ?? []) {
-        form.append('ocr_lang', lang);
-    }
-    if (options.pageRange !== undefined) {
-        form.append('page_range', String(options.pageRange[0]));
-        form.append('page_range', String(options.pageRange[1]));
-    }
-    if (options.documentTimeout !== undefined) {
-        form.append('document_timeout', String(options.documentTimeout));
+    for (const [key, value] of Object.entries(settings)) {
+        const name = key.replace(MATCH_UPPER_CASE, (letter) => `_${letter.toLowerCase()}`);
+        for (const item of value === null ? [] : Array.isArray(value) ? value : [value]) {
+            form.append(name, String(item));
+        }
     }
     return form;
 }

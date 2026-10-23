@@ -74,12 +74,12 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
     return prototype === Object.prototype || prototype === null;
 }
 
-/** Checks whether value is a boolean primitive. */
+/** Returns true for boolean primitives (`true` or `false`). */
 export function isBoolean(value: unknown): value is boolean {
     return value === true || value === false;
 }
 
-/** Type guard checking whether string is included in allowed set. */
+/** Returns true when string belongs to allowed set. */
 export function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value is T {
     return typeof value === 'string' && (allowed as readonly string[]).includes(value);
 }

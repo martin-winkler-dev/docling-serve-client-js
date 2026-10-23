@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'bun:test';
 import { fetchJson } from '../../src/core/http.js';
 
+/** Creates a mock fetch answering with the response from `fn`. */
 function fetchOf(fn: () => Response | Promise<Response>) {
     async function answer() {
         return fn();
@@ -135,6 +136,7 @@ describe('fetchJson', () => {
     });
 
     test('maps an aborted signal to aborted, whatever the abort reason', async () => {
+        /** Mock fetch that throws immediately if signal was aborted. */
         async function rejectOnAbortFetch(_url: string, init: RequestInit) {
             init.signal?.throwIfAborted();
             return Response.json({});

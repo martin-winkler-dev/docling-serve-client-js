@@ -16,11 +16,16 @@ import {
 import type { ImageOptions, ImageSize } from '../../src/types.js';
 import { pngBytes, toBase64 } from '../mock/image-bytes.js';
 
+/** Image extraction options with omitSmall disabled. */
 const OPTIONS: Required<ImageOptions> = { prefix: 'out/images/1234-', omitSmall: false };
+
+/** Minimal GIF header. */
 const GIF = new TextEncoder().encode('GIF89a\x01\x00\x01\x00');
+
 /** JPEG SOI + EOI: a format whose size is not read. */
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
 
+/** Builds a markdown embedded base64 image link. */
 function embedded(bytes: Uint8Array, mimeType = 'image/png', alt = 'Image'): string {
     return `![${alt}](data:${mimeType};base64,${toBase64(bytes)})`;
 }
@@ -347,6 +352,7 @@ describe('isSmallImage', () => {
 });
 
 describe('removeImagePlaceholders', () => {
+    /** Image placeholder marker. */
     const P = '<!-- image -->';
 
     test('removes a placeholder paragraph with one adjacent blank line', () => {

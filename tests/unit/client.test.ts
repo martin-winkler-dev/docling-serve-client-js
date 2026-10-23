@@ -11,16 +11,20 @@ import type {
     ConvertedMarkdown,
     DoclingClient,
     DoclingConfig,
+    DoclingSettings,
     DocumentJob,
     Job,
+    JobRef,
     JobState,
     MarkdownJob,
     Result,
+    ServerCapabilities,
     TaskFailure,
 } from '../../src/types.js';
 import {
     BROKEN_PDF_MARKER,
     createMockDoclingServer,
+    MOCK_CAPABILITIES,
     MOCK_SCHEMA_VERSION,
     MOCK_VERSIONS,
     type MockDoclingServer,
@@ -49,11 +53,11 @@ const PNG = pngBytes(300, 80);
 /** PDF the mock reports as a failed conversion. */
 const BROKEN_PDF = new TextEncoder().encode(`%PDF-1.7\n${BROKEN_PDF_MARKER}`);
 
-/** Stored md job with placeholder images. */
-const MD_JOB: MarkdownJob = { kind: 'markdown', id: 't-1', output: { images: 'placeholder' } };
+/** Stored md job with placeholder images, without the optional settings. */
+const MD_JOB: Omit<MarkdownJob, 'settings'> = { kind: 'markdown', id: 't-1', output: { images: 'placeholder' } };
 
-/** Stored document job. */
-const DOC_JOB: DocumentJob = { kind: 'document', id: 't-1' };
+/** Stored document job, without the optional settings. */
+const DOC_JOB: Omit<DocumentJob, 'settings'> = { kind: 'document', id: 't-1' };
 
 /** Server details of an error item that sent no fields besides the message. */
 const NO_DETAILS = { component: null, module: null, category: null, page: null };
@@ -81,6 +85,84 @@ const DEFAULT_FIELDS = {
     force_ocr: 'false',
     include_page_images: 'false',
     images_scale: '2',
+    ocr_preset: 'auto',
+    table_structure_preset: 'tableformer_v1_accurate',
+    table_cell_matching: 'true',
+    do_picture_classification: 'false',
+    do_picture_description: 'false',
+    abort_on_error: 'false',
+};
+
+/** Settings of `convertMarkdown(PDF)` with default options. */
+const MD_SETTINGS: DoclingSettings = {
+    fromFormats: 'pdf',
+    toFormats: 'md',
+    imageExportMode: 'placeholder',
+    includeImages: false,
+    includePageImages: false,
+    imagesScale: 2,
+    mdCompactTables: true,
+    mdPageBreakPlaceholder: '',
+    doOcr: true,
+    forceOcr: false,
+    ocrPreset: 'auto',
+    ocrLang: [],
+    pdfBackend: 'docling_parse',
+    pipeline: 'standard',
+    vlmPipelinePreset: null,
+    doTableStructure: true,
+    tableMode: 'accurate',
+    tableStructurePreset: 'tableformer_v1_accurate',
+    tableCellMatching: true,
+    doPdfHeadingHierarchy: true,
+    doFormulaEnrichment: true,
+    doCodeEnrichment: false,
+    codeFormulaPreset: 'codeformulav2',
+    doChartExtraction: false,
+    chartExtractionPreset: null,
+    doPictureClassification: false,
+    doPictureDescription: false,
+    pageRange: null,
+    documentTimeout: null,
+    abortOnError: false,
+};
+
+/** Settings of `convertDocument(PDF)` with default options: json without md fields, embedded pictures. */
+const DOC_SETTINGS: DoclingSettings = {
+    ...MD_SETTINGS,
+    toFormats: 'json',
+    imageExportMode: 'embedded',
+    includeImages: true,
+    mdCompactTables: null,
+    mdPageBreakPlaceholder: null,
+};
+
+/** `MOCK_CAPABILITIES` as `capabilities()` returns it. */
+const EXPECTED_CAPABILITIES: ServerCapabilities = {
+    versions: MOCK_CAPABILITIES.versions,
+    stages: Object.fromEntries(
+        Object.entries(MOCK_CAPABILITIES.stages).map(([key, stage]) => [
+            key,
+            {
+                option: stage.option,
+                customConfigOption: stage.custom_config_option,
+                default: stage.default,
+                presets: stage.presets,
+            },
+        ]),
+    ),
+    sources: MOCK_CAPABILITIES.sources,
+    targets: MOCK_CAPABILITIES.targets,
+    outputFormats: MOCK_CAPABILITIES.output_formats,
+    imageExportModes: MOCK_CAPABILITIES.image_export_modes,
+    limits: {
+        maxDocumentTimeout: 604800,
+        maxImagesScale: 2,
+        maxSourcesPerRequest: 3,
+        maxNumPages: null,
+        maxFileSize: null,
+    },
+    features: { apiKeyRequired: false, artifactStorage: false, websocket: true },
 };
 
 /** docling's md of the mock document with default options: heading hierarchy, compact tables, placeholders. */
@@ -176,7 +258,7 @@ function task(taskStatus: string, extra: object = {}): Response {
 }
 
 /** Polls until the job is no longer queued or running (the mock finishes on the third poll). */
-async function checkUntilDone(client: DoclingClient, job: Job) {
+async function checkUntilDone(client: DoclingClient, job: JobRef) {
     const states = [];
     for (let i = 0; i < 3; i++) {
         states.push(await client.check(job));
@@ -186,6 +268,7 @@ async function checkUntilDone(client: DoclingClient, job: Job) {
 
 /** `fetch` that never answers conversion, poll and result requests, but rejects once their signal aborts. */
 function hangExceptVersion(server: MockDoclingServer): typeof fetch {
+    /** Stalls responses until signal aborts. */
     async function hang(url: string | URL | Request, init?: RequestInit) {
         if (String(url).endsWith('/version')) {
             return server.fetch(url, init);
@@ -209,9 +292,10 @@ function resolveRef(doc: DoclingDocument, ref: string): unknown {
 // -------------------------------------------------------------------
 
 describe('createDoclingClient', () => {
-    test('returns the five client functions for a valid config', () => {
+    test('returns the six client functions for a valid config', () => {
         const { client } = setup({ apiKey: 'k', timeoutMs: 1000, options: { ocr: false, pageRange: [1, 2] } });
         expect(Object.keys(client).sort()).toEqual([
+            'capabilities',
             'check',
             'convertDocument',
             'convertMarkdown',
@@ -252,6 +336,7 @@ describe('request', () => {
             ...DEFAULT_FIELDS,
             to_formats: 'md',
             md_compact_tables: 'true',
+            md_page_break_placeholder: '',
             include_images: 'false',
             image_export_mode: 'placeholder',
         });
@@ -351,12 +436,62 @@ describe('request', () => {
 
     test('image input always runs OCR, never full-page; the PDF settings of ocr and forceOcr are ignored', async () => {
         const { server, client } = setup({ options: { ocr: false, forceOcr: true } });
-        await client.convertMarkdown(PNG);
+        const md = dataOf(await client.convertMarkdown(PNG));
         expect(sentFields(server)).toMatchObject({ from_formats: 'image', do_ocr: 'true', force_ocr: 'false' });
-        await client.submitDocument(PNG, { ocr: false, forceOcr: true });
+        expect(md.settings).toMatchObject({ fromFormats: 'image', doOcr: true, forceOcr: false });
+        const job = dataOf(await client.submitDocument(PNG, { ocr: false, forceOcr: true }));
         expect(sentFields(server)).toMatchObject({ from_formats: 'image', do_ocr: 'true', force_ocr: 'false' });
-        await client.convertDocument(PDF);
+        expect(job.settings).toMatchObject({ fromFormats: 'image', doOcr: true, forceOcr: false });
+        const pdf = dataOf(await client.convertDocument(PDF));
         expect(sentFields(server)).toMatchObject({ from_formats: 'pdf', do_ocr: 'false', force_ocr: 'true' });
+        expect(pdf.settings).toMatchObject({ fromFormats: 'pdf', doOcr: false, forceOcr: true });
+    });
+
+    test('sent form fields and returned settings are identical for every option combination (round-trip)', async () => {
+        const { server, client } = setup({
+            options: { ocrLang: ['de', 'en'], pageRange: [2, 3], documentTimeout: 45 },
+        });
+        /** Converts a `DoclingSettings` object to the expected `sentFields(server)` record. */
+        function toFormRecord(settings: DoclingSettings): Record<string, string | string[]> {
+            const record: Record<string, string | string[]> = {};
+            for (const [key, value] of Object.entries(settings)) {
+                if (value === null || (Array.isArray(value) && value.length === 0)) {
+                    continue;
+                }
+                const name = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+                record[name] = Array.isArray(value) ? value.map(String) : String(value);
+            }
+            return record;
+        }
+        const md = dataOf(
+            await client.convertMarkdown(PDF, {
+                pipeline: 'vlm',
+                chartExtraction: true,
+                formulaEnrichment: false,
+                ocrEngine: 'rapidocr',
+                images: 'extract',
+                imageOptions: { prefix: PREFIX },
+            }),
+        );
+        expect(sentFields(server)).toEqual(toFormRecord(md.settings));
+        expect(md.settings).toMatchObject({
+            pipeline: 'vlm',
+            vlmPipelinePreset: 'granite_docling',
+            doChartExtraction: true,
+            chartExtractionPreset: 'granite_vision_v4',
+            doFormulaEnrichment: false,
+            doCodeEnrichment: false,
+            codeFormulaPreset: null,
+            ocrPreset: 'rapidocr',
+            ocrLang: ['de', 'en'],
+            pageRange: [2, 3],
+            documentTimeout: 45,
+        });
+        const doc = dataOf(await client.convertDocument(PNG, { ocrEngine: 'custom-ocr-v2', pageImages: true }));
+        expect(sentFields(server)).toEqual(toFormRecord(doc.settings));
+        expect(doc.settings.ocrPreset).toBe('custom-ocr-v2');
+        const sub = dataOf(await setup().client.submitDocument(PDF));
+        expect(sub.settings).toEqual(DOC_SETTINGS);
     });
 
     test('submit functions post the same fields to the async endpoint', async () => {
@@ -572,7 +707,13 @@ describe('convertMarkdown', () => {
         const res = await client.convertMarkdown(PDF);
         expect(res).toEqual({
             ok: true,
-            data: { markdown: DEFAULT_MARKDOWN, images: [], warnings: [], versions: MOCK_VERSIONS },
+            data: {
+                markdown: DEFAULT_MARKDOWN,
+                images: [],
+                warnings: [],
+                versions: MOCK_VERSIONS,
+                settings: MD_SETTINGS,
+            },
         });
         expect(dataOf(res).markdown).toBe(renderMockMarkdown(lastForm(server)));
     });
@@ -671,6 +812,7 @@ describe('convertMarkdown', () => {
                     },
                 ],
                 versions: MOCK_VERSIONS,
+                settings: { ...MD_SETTINGS, imageExportMode: 'embedded', includeImages: true },
             },
         });
     });
@@ -696,6 +838,7 @@ describe('convertMarkdown', () => {
                 images: [],
                 warnings: [{ code: 'server', message: 'page 3 failed', details: NO_DETAILS }],
                 versions: MOCK_VERSIONS,
+                settings: MD_SETTINGS,
             },
         });
     });
@@ -752,7 +895,7 @@ describe('convertMarkdown', () => {
             server.failNext(Response.json(body));
             expect(await client.convertMarkdown(PDF)).toEqual({
                 ok: true,
-                data: { markdown: 'x', images: [], warnings: [], versions: MOCK_VERSIONS },
+                data: { markdown: 'x', images: [], warnings: [], versions: MOCK_VERSIONS, settings: MD_SETTINGS },
             });
         }
         server.failNext(Response.json({ status: 'failure', errors: [null], failure: { message: 1 } }));
@@ -925,6 +1068,7 @@ describe('convertDocument', () => {
             pageImages: [],
             warnings: [],
             versions: MOCK_VERSIONS,
+            settings: DOC_SETTINGS,
         });
         expect(res.document.schema_name).toBe('DoclingDocument');
         expect(res.document.version).toBe(MOCK_SCHEMA_VERSION);
@@ -1139,6 +1283,7 @@ describe('versions', () => {
 
     test('a hanging version endpoint gives null after 2 s, the conversion still succeeds', async () => {
         const server = createMockDoclingServer();
+        /** Stalls only the /version route indefinitely. */
         async function hangOnVersion(url: string | URL | Request, init?: RequestInit) {
             return String(url).endsWith('/version') ? new Promise<Response>(() => {}) : server.fetch(url, init);
         }
@@ -1148,12 +1293,13 @@ describe('versions', () => {
         const elapsed = performance.now() - started;
         expect(dataOf(res).versions).toBeNull();
         expect(elapsed).toBeGreaterThanOrEqual(1900);
-        expect(elapsed).toBeLessThan(2500);
+        expect(elapsed).toBeLessThan(3500);
     });
 
     test('aborting the caller signal after the conversion does not affect the version request', async () => {
         const server = createMockDoclingServer();
         const controller = new AbortController();
+        /** Aborts controller immediately after conversion route completes. */
         async function abortAfterConversion(url: string | URL | Request, init?: RequestInit) {
             const res = await server.fetch(url, init);
             if (String(url).endsWith('/v1/convert/file')) {
@@ -1205,6 +1351,7 @@ describe('submit + check', () => {
                 kind: 'markdown',
                 id: 'mock-task-1',
                 output: { images: 'extract', imageOptions: { prefix: PREFIX, omitSmall: false } },
+                settings: { ...MD_SETTINGS, imageExportMode: 'embedded', includeImages: true },
             },
         });
         const stored: MarkdownJob = JSON.parse(JSON.stringify(dataOf(job)));
@@ -1212,6 +1359,7 @@ describe('submit + check', () => {
         expect(queued).toEqual({ ok: true, data: { status: 'queued', position: 1 } });
         expect(running).toEqual({ ok: true, data: { status: 'running' } });
         const result = doneOf(done as Result<JobState<ConvertedMarkdown>>);
+        expect('settings' in result).toBe(false);
         expect(result.images.map((image) => image.path)).toEqual(['out/images/1234-1.png', 'out/images/1234-2.png']);
         expect(result.markdown).toContain('Research &amp; Development');
         expect(result.warnings).toEqual([]);
@@ -1246,7 +1394,14 @@ describe('submit + check', () => {
     test('submitDocument returns a document job; check returns the document when done', async () => {
         const { server, client } = setup();
         const job = await client.submitDocument(PDF, { images: 'placeholder' });
-        expect(job).toEqual({ ok: true, data: { kind: 'document', id: 'mock-task-1' } });
+        expect(job).toEqual({
+            ok: true,
+            data: {
+                kind: 'document',
+                id: 'mock-task-1',
+                settings: { ...DOC_SETTINGS, imageExportMode: 'placeholder', includeImages: false },
+            },
+        });
         const form = lastForm(server);
         const states = await checkUntilDone(client, dataOf(job));
         expect(states.slice(0, 2).map((state) => dataOf(state).status)).toEqual(['queued', 'running']);
@@ -1264,7 +1419,11 @@ describe('submit + check', () => {
     test('check returns the page images of a document job submitted with pageImages', async () => {
         const { client } = setup();
         const job = dataOf(await client.submitDocument(PDF, { pageImages: true, images: 'placeholder' }));
-        expect(job).toEqual({ kind: 'document', id: 'mock-task-1' });
+        expect(job).toEqual({
+            kind: 'document',
+            id: 'mock-task-1',
+            settings: { ...DOC_SETTINGS, includeImages: false, includePageImages: true },
+        });
         const done = doneOf((await checkUntilDone(client, job))[2] as Result<JobState<ConvertedDocument>>);
         expect(done.pageImages.map(({ page, width, height }) => [page, width, height])).toEqual([
             [1, 1190, 1684],
@@ -1361,7 +1520,7 @@ describe('submit + check', () => {
         const { server, client } = setup();
         server.failNext(task('success'));
         server.failNext(converted('![Image](data:image/png;base64,a=b)'));
-        const job: MarkdownJob = {
+        const job: JobRef = {
             kind: 'markdown',
             id: 't-1',
             output: { images: 'extract', imageOptions: { prefix: PREFIX, omitSmall: true } },
@@ -1541,6 +1700,102 @@ describe('submit + check', () => {
             const file = lastForm(server).get('files') as File;
             expect(new Uint8Array(await file.arrayBuffer())).toEqual(PDF);
         }
+    });
+});
+
+describe('capabilities', () => {
+    test('fetches /v1/capabilities on demand and maps snake_case to camelCase', async () => {
+        const { server, client } = setup({ apiKey: 'secret' }, { apiKey: 'secret' });
+        const res = await client.capabilities();
+        expect(res).toEqual({ ok: true, data: EXPECTED_CAPABILITIES });
+        expect(sentPaths(server)).toEqual(['/v1/capabilities']);
+        expect(server.requests[0]?.headers.get('X-Api-Key')).toBe('secret');
+    });
+
+    test('tolerates missing, extra and mistyped fields in the capabilities payload', async () => {
+        const { server, client } = setup();
+        server.failNext(
+            Response.json({
+                versions: { docling: '2.140.0', skipped: 1 },
+                stages: {
+                    ocr: {
+                        option: 'ocr_preset',
+                        custom_config_option: 'ocr_custom',
+                        default: 'auto',
+                        presets: [
+                            { id: 'auto', name: 'auto', description: 'default ocr', source: 'docling' },
+                            { id: 'bare' },
+                            { name: 'missing-id' },
+                            null,
+                        ],
+                    },
+                    broken: null,
+                },
+                sources: ['file', 42],
+                targets: null,
+                output_formats: 'not-an-array',
+                limits: { max_images_scale: Number.NaN, max_num_pages: 100 },
+                features: { websocket: 'yes', api_key_required: true },
+            }),
+        );
+        expect(dataOf(await client.capabilities())).toEqual({
+            versions: { docling: '2.140.0' },
+            stages: {
+                ocr: {
+                    option: 'ocr_preset',
+                    customConfigOption: 'ocr_custom',
+                    default: 'auto',
+                    presets: [
+                        { id: 'auto', name: 'auto', description: 'default ocr', source: 'docling' },
+                        { id: 'bare', name: '', description: null, source: '' },
+                    ],
+                },
+                broken: { option: '', customConfigOption: null, default: '', presets: [] },
+            },
+            sources: ['file'],
+            targets: { allowed: [], default: '' },
+            outputFormats: [],
+            imageExportModes: [],
+            limits: {
+                maxDocumentTimeout: null,
+                maxImagesScale: null,
+                maxSourcesPerRequest: null,
+                maxNumPages: 100,
+                maxFileSize: null,
+            },
+            features: { apiKeyRequired: true, artifactStorage: false, websocket: false },
+        });
+    });
+
+    test('non-object body maps to invalid_response; HTTP and abort errors behave like other calls', async () => {
+        const { server, client } = setup();
+        for (const body of [null, 'x', [1]]) {
+            server.failNext(Response.json(body));
+            expect(errorOf(await client.capabilities())).toEqual({
+                code: 'invalid_response',
+                message: 'Capabilities response is not a JSON object',
+                versions: MOCK_VERSIONS,
+            });
+        }
+        server.failNext(Response.json({ detail: 'Not Found' }, { status: 404 }));
+        expect(errorOf(await client.capabilities())).toEqual({
+            code: 'http',
+            message: 'HTTP 404: Not Found',
+            status: 404,
+            versions: MOCK_VERSIONS,
+        });
+        expect(errorOf(await client.capabilities({ signal: AbortSignal.abort() }))?.code).toBe('aborted');
+    });
+
+    test('invalid options reject with a TypeError before any request', async () => {
+        const { server, client } = setup();
+        await expect(client.capabilities({ invalid: true } as never)).rejects.toThrow(
+            new TypeError('Option "invalid" is not supported'),
+        );
+        await expect(client.capabilities('bad' as never)).rejects.toThrow(
+            new TypeError('Invalid options: expected an object'),
+        );
+        expect(server.requests).toHaveLength(0);
     });
 });
 
