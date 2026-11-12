@@ -47,7 +47,7 @@ const DOCUMENT = {
 const BOTTOM_LEFT_BOX: BoundingBox = { l: 100, t: 750, r: 300, b: 720, coord_origin: 'BOTTOMLEFT' };
 
 describe('toPageImageBox', () => {
-    test('flips a bottom-left box to a top-left origin and scales points to 144 dpi pixels', () => {
+    test('transforms bottom-left origin box to top-left origin and scales coordinates to 144 dpi pixels', () => {
         expect(PAGE_IMAGE_SCALE).toBe(2);
         expect(toPageImageBox(DOCUMENT, { page_no: 1, bbox: BOTTOM_LEFT_BOX })).toEqual({
             page: 1,
@@ -58,7 +58,7 @@ describe('toPageImageBox', () => {
         });
     });
 
-    test('scales a top-left box (table cells) without flipping, using the height of its own page', () => {
+    test('scales top-left origin box without coordinate inversion using page height', () => {
         const bbox: BoundingBox = { l: 10, t: 20, r: 50, b: 35, coord_origin: 'TOPLEFT' };
         expect(toPageImageBox(DOCUMENT, { page_no: 2, bbox })).toEqual({
             page: 2,
@@ -74,7 +74,7 @@ describe('toPageImageBox', () => {
         expect(flipped).toEqual({ page: 2, x: 20, y: 40, width: 80, height: 30 });
     });
 
-    test('a box with swapped edges still gets a positive width and height', () => {
+    test('normalizes bounding box with inverted coordinates to positive width and height', () => {
         const bbox: BoundingBox = { l: 300, t: 720, r: 100, b: 750, coord_origin: 'BOTTOMLEFT' };
         expect(toPageImageBox(DOCUMENT, { page_no: 1, bbox })).toEqual({
             page: 1,
@@ -85,7 +85,7 @@ describe('toPageImageBox', () => {
         });
     });
 
-    test('undefined for a missing page or a non-finite coordinate; never throws', () => {
+    test('returns undefined without throwing for missing pages or non-finite coordinates', () => {
         expect(toPageImageBox(DOCUMENT, { page_no: 3, bbox: BOTTOM_LEFT_BOX })).toBeUndefined();
         expect(toPageImageBox(DOCUMENT, { page_no: 1, bbox: { ...BOTTOM_LEFT_BOX, t: Number.NaN } })).toBeUndefined();
         expect(toPageImageBox(DOCUMENT, { page_no: 1, bbox: null as never })).toBeUndefined();
@@ -105,17 +105,17 @@ describe('toPageImageBox', () => {
 });
 
 describe('readPngSize', () => {
-    test('reads the PNG header', () => {
+    test('extracts image dimensions from PNG header', () => {
         expect(readPngSize(pngBytes(400, 300))).toEqual({ width: 400, height: 300 });
     });
 
-    test('works on a view into a larger buffer', () => {
+    test('extracts image dimensions from a subarray view of a larger buffer', () => {
         const buffer = new Uint8Array(100);
         buffer.set(pngBytes(7, 9), 10);
         expect(readPngSize(buffer.subarray(10, 55))).toEqual({ width: 7, height: 9 });
     });
 
-    test('returns undefined for other formats and truncated data', () => {
+    test('returns undefined for non-PNG formats and truncated headers', () => {
         expect(readPngSize(GIF)).toBeUndefined();
         expect(readPngSize(JPEG)).toBeUndefined();
         const notPng = pngBytes(400, 300);
@@ -126,7 +126,7 @@ describe('readPngSize', () => {
         expect(readPngSize(pngBytes(1, 1).subarray(0, 24))).toEqual({ width: 1, height: 1 });
     });
 
-    test('needs the full 8-byte signature and IHDR as first chunk', () => {
+    test('requires full 8-byte PNG signature and leading IHDR chunk', () => {
         const shortSignature = new Uint8Array(24);
         shortSignature.set([0x89, 0x50, 0x4e, 0x47]);
         shortSignature.set([0, 0, 1, 0x90, 0, 0, 1, 0x2c], 16);
@@ -139,11 +139,11 @@ describe('readPngSize', () => {
         expect(readPngSize(noIhdr)).toBeUndefined();
     });
 
-    test('reads a Buffer, a Uint8Array subclass', () => {
+    test('extracts dimensions from Buffer instances', () => {
         expect(readPngSize(Buffer.from(pngBytes(12, 34)))).toEqual({ width: 12, height: 34 });
     });
 
-    test('returns undefined for input that is not a Uint8Array', () => {
+    test('returns undefined for non-Uint8Array inputs', () => {
         const png = pngBytes(400, 300);
         const invalid: unknown[] = [undefined, null, 'PNG', [...png], png.buffer, new DataView(png.buffer), {}];
         for (const value of invalid) {
@@ -153,7 +153,7 @@ describe('readPngSize', () => {
 });
 
 describe('extractImages', () => {
-    test('replaces embedded images with numbered links under the prefix and returns the bytes', () => {
+    test('replaces embedded data URI images with prefixed paths and returns image bytes', () => {
         const png = pngBytes(400, 300);
         const md = `# T\n\n${embedded(png)}\n\ntext\n\n${embedded(JPEG, 'image/jpeg', 'Figure')}`;
         expect(extracted(md)).toEqual({
@@ -166,13 +166,13 @@ describe('extractImages', () => {
         });
     });
 
-    test('decodes base64 that contains line breaks', () => {
+    test('decodes base64 image data containing embedded whitespace and line breaks', () => {
         const base64 = toBase64(pngBytes(3, 4)).replace(/(.{10})/g, '$1\n');
         const res = extracted(`![Image](data:image/png;base64,${base64})`);
         expect(res.images[0]?.width).toBe(3);
     });
 
-    test('omitSmall removes small images without a gap and numbers only kept ones', () => {
+    test('removes small images cleanly and numbers only retained images when omitSmall is enabled', () => {
         const badge = embedded(pngBytes(88, 32));
         const md = `${badge}\n\nA\n\n${badge}\n\n${embedded(pngBytes(400, 300))}\n\nB\n\n${badge}`;
         const res = extracted(md, { omitSmall: true });
@@ -181,14 +181,14 @@ describe('extractImages', () => {
         expect(extracted(md).images).toHaveLength(4);
     });
 
-    test('an unreadable size counts as 0x0 and is never small', () => {
+    test('treats unreadable image sizes as 0x0 and retains them when omitSmall is enabled', () => {
         const md = `a\n\n${embedded(GIF, 'image/gif')}\n\nb`;
         const kept = extracted(md, { omitSmall: true });
         expect(kept.markdown).toBe('a\n\n![Image](out/images/1234-1.gif)\n\nb');
         expect(kept.images[0]).toMatchObject({ width: 0, height: 0, mimeType: 'image/gif' });
     });
 
-    test('maps the MIME subtype to a file extension, unknown subtypes to bin', () => {
+    test('maps MIME subtypes to standard file extensions and unknown types to bin', () => {
         const extensions = [
             ['image/png', 'png'],
             ['image/jpeg', 'jpg'],
@@ -208,7 +208,7 @@ describe('extractImages', () => {
         }
     });
 
-    test('returns plain Uint8Array bytes that own their buffer', () => {
+    test('returns extracted image bytes as standalone Uint8Array buffers', () => {
         const png = pngBytes(5, 6);
         const [image] = extracted(`${embedded(png)}\n\n${embedded(JPEG, 'image/jpeg')}`).images;
         expect(image?.bytes.constructor).toBe(Uint8Array);
@@ -217,14 +217,14 @@ describe('extractImages', () => {
         expect(image?.bytes.buffer.byteLength).toBe(png.length);
     });
 
-    test('decodes base64url data', () => {
+    test('decodes base64url encoded image data', () => {
         const bytes = new Uint8Array([0xfb, 0xff, 0xbf]);
         expect(toBase64(bytes)).toBe('+/+/');
         const [image] = extracted('![Image](data:image/gif;base64,-_-_)').images;
         expect(image?.bytes).toEqual(bytes);
     });
 
-    test('data with characters outside base64 is removed with a warning, not left in the md', () => {
+    test('removes image references with invalid base64 characters and emits image_not_decoded warning', () => {
         for (const broken of ['iVBOR!w0KGgo=', 'QUJD QUJD*', 'ab"cd']) {
             const res = extracted(`a\n\n![Image](data:image/png;base64,${broken})\n\nb`);
             expect(res.markdown).toBe('a\n\nb');
@@ -232,28 +232,28 @@ describe('extractImages', () => {
         }
     });
 
-    test('accepts unpadded base64', () => {
+    test('decodes unpadded base64 image data', () => {
         const [image] = extracted('![Image](data:image/gif;base64,QQ)').images;
         expect(image?.bytes).toEqual(new Uint8Array([65]));
     });
 
-    test("keeps docling's placeholders for pictures without data", () => {
+    test('preserves existing image placeholders for pictures without embedded data', () => {
         const md = `a\n\n<!-- image -->\n\n${embedded(pngBytes(1, 1))}`;
         expect(extracted(md).markdown).toBe(`a\n\n<!-- image -->\n\n![Image](out/images/1234-1.png)`);
     });
 
-    test("removes omitted images next to docling's placeholders, keeping the placeholders", () => {
+    test('removes omitted small images adjacent to placeholders while preserving placeholders', () => {
         const badge = embedded(pngBytes(88, 32));
         const md = `a\n\n<!-- image -->\n\n${badge}\n\nb\n\n${badge}\n<!-- image -->\n\nc`;
         expect(extracted(md, { omitSmall: true }).markdown).toBe('a\n\n<!-- image -->\n\nb\n\n<!-- image -->\n\nc');
     });
 
-    test('an omitted image keeps the blank line between paragraphs that only one side had', () => {
+    test('preserves paragraph boundary when removing omitted images', () => {
         const md = `a\n\n${embedded(pngBytes(88, 32))}\nb`;
         expect(extracted(md, { omitSmall: true }).markdown).toBe('a\n\nb');
     });
 
-    test('removes invalid or empty base64 images with a warning and keeps the other images', () => {
+    test('removes invalid or empty base64 images with warning while preserving valid images', () => {
         for (const broken of ['abc=def', '', 'AAAAA', 'QQ==QQ==', '====']) {
             const png = pngBytes(2, 2);
             const md = `a\n\n![Broken](data:image/png;base64,${broken})\n\nb\n\n${embedded(png)}`;
@@ -271,7 +271,7 @@ describe('extractImages', () => {
         }
     });
 
-    test('counts the warning index over all embedded images, also omitted small ones', () => {
+    test('maintains sequential image index in warnings including omitted small images', () => {
         const badge = embedded(pngBytes(88, 32));
         const md = `${badge}\n\n${embedded(pngBytes(400, 300))}\n\n![Broken](data:image/png;base64,abc=def)`;
         const res = extracted(md, { omitSmall: true });
@@ -279,7 +279,7 @@ describe('extractImages', () => {
         expect(res.warnings.map((warning) => warning.details)).toEqual([{ index: 3 }]);
     });
 
-    test('an image inside a line of text is cut out of it when omitted', () => {
+    test('removes inline images within text lines cleanly when omitted', () => {
         const md = `see ${embedded(pngBytes(16, 16))} and ![Broken](data:image/png;base64,) here`;
         const res = extracted(md, { omitSmall: true });
         expect(res.markdown).toBe('see  and  here');
@@ -287,14 +287,14 @@ describe('extractImages', () => {
         expect(res.warnings.map((warning) => warning.details)).toEqual([{ index: 2 }]);
     });
 
-    test('returns Markdown without images unchanged', () => {
+    test('returns markdown unchanged when no images are present', () => {
         const md = '# T\n\n![Photo](photo.png)\n\ntext';
         expect(extracted(md)).toEqual({ markdown: md, images: [], warnings: [] });
     });
 });
 
 describe('isSmallImage', () => {
-    test('keeps the smallest real figures of the sample, also thin and narrow ones', () => {
+    test('returns false for figures exceeding dimensions or area threshold', () => {
         const figures = [
             [435, 48],
             [95, 230],
@@ -307,7 +307,7 @@ describe('isSmallImage', () => {
         }
     });
 
-    test('drops glyphs, badges, square logos and thin rules', () => {
+    test('returns true for small badges, icons, square logos, and thin lines', () => {
         const small = [
             [157, 35],
             [88, 32],
@@ -320,7 +320,7 @@ describe('isSmallImage', () => {
         }
     });
 
-    test('each limit is exclusive: area 15 000, longer side 200, shorter side 24', () => {
+    test('enforces threshold boundaries for area (15000), long edge (200), and short edge (24)', () => {
         expect(isSmallImage({ width: 200, height: 75 })).toBe(false);
         expect(isSmallImage({ width: 200, height: 74 })).toBe(true);
         expect(isSmallImage({ width: 199, height: 199 })).toBe(true);
@@ -328,12 +328,12 @@ describe('isSmallImage', () => {
         expect(isSmallImage({ width: 23, height: 1000 })).toBe(true);
     });
 
-    test('works on the picture size of a DoclingDocument, also with fractional pixels', () => {
+    test('evaluates picture sizes with fractional dimensions correctly', () => {
         expect(isSmallImage({ width: 433.5, height: 72.25 })).toBe(false);
         expect(isSmallImage({ width: 87.9, height: 31.4 })).toBe(true);
     });
 
-    test('returns false for invalid input instead of throwing', () => {
+    test('returns false without throwing for invalid or non-numeric image sizes', () => {
         const invalid: unknown[] = [
             undefined,
             null,
@@ -355,7 +355,7 @@ describe('removeImagePlaceholders', () => {
     /** Image placeholder marker. */
     const P = '<!-- image -->';
 
-    test('removes a placeholder paragraph with one adjacent blank line', () => {
+    test('removes standalone placeholder paragraphs and collapses adjacent blank lines', () => {
         expect(removeImagePlaceholders(`${P}\n\nA`)).toBe('A');
         expect(removeImagePlaceholders(`A\n\n${P}\n\nB`)).toBe('A\n\nB');
         expect(removeImagePlaceholders(`A\n\n${P}`)).toBe('A');
@@ -364,12 +364,12 @@ describe('removeImagePlaceholders', () => {
         expect(removeImagePlaceholders(P)).toBe('');
     });
 
-    test('removes a placeholder between text lines without touching them', () => {
+    test('removes placeholders between consecutive text lines without modifying text', () => {
         expect(removeImagePlaceholders(`A\n${P}\nB`)).toBe('A\nB');
         expect(removeImagePlaceholders(`A\n${P}\n${P}\nB`)).toBe('A\nB');
     });
 
-    test('keeps the blank line that separates paragraphs when only one side of a placeholder is blank', () => {
+    test('preserves paragraph boundary when placeholder has whitespace on only one side', () => {
         expect(removeImagePlaceholders(`A\n\n${P}\nB`)).toBe('A\n\nB');
         expect(removeImagePlaceholders(`A\n${P}\n\nB`)).toBe('A\n\nB');
         expect(removeImagePlaceholders(`A\n\n${P}\n${P}\n\nB`)).toBe('A\n\nB');
@@ -379,17 +379,17 @@ describe('removeImagePlaceholders', () => {
         expect(removeImagePlaceholders(`${P}\nA`)).toBe('A');
     });
 
-    test('removes a placeholder inside a line of text alone', () => {
+    test('removes inline placeholder comments within a text line', () => {
         expect(removeImagePlaceholders(`see ${P} here`)).toBe('see  here');
     });
 
-    test('keeps Markdown without placeholders unchanged', () => {
+    test('returns markdown unchanged when no placeholders are present', () => {
         expect(removeImagePlaceholders('a\n\n\n\nb')).toBe('a\n\n\n\nb');
     });
 });
 
 describe('extractPageImages', () => {
-    test('falls back to 0x0 size for non-PNG page image without valid size', () => {
+    test('falls back to 0x0 dimensions for non-PNG page images without explicit size metadata', () => {
         const doc = {
             pages: {
                 '1': {

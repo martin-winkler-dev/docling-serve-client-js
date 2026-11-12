@@ -25,6 +25,9 @@ for (const name of [
     'submitMarkdown',
     'submitDocument',
     'check',
+    'runMarkdown',
+    'runDocument',
+    'waitForJob',
     'capabilities',
 ]) {
     assert.equal(typeof client[name], 'function');

@@ -45,6 +45,7 @@ export type {
     PdfBackend,
     PdfInput,
     Pipeline,
+    PollOptions,
     Result,
     ServerCapabilities,
     ServerDetails,

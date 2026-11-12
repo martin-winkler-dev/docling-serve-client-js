@@ -23,6 +23,7 @@ import type {
     MarkdownImageMode,
     MarkdownJobOutput,
     MarkdownOptions,
+    PollOptions,
     Result,
 } from './types.js';
 
@@ -44,8 +45,16 @@ export type ResolvedConfig = {
     fetch: typeof fetch;
     /** Time limit per request in ms; unset means no limit. */
     timeoutMs?: number;
+    /** Delay between job helper status polls in ms; defaults to `DEFAULT_POLL_MS`. */
+    pollMs: number;
     /** Factory defaults merged over `DEFAULT_OPTIONS`. */
     defaults: ResolvedOptions;
+};
+
+/** Validated poll settings for job helpers. */
+export type PollCall = {
+    pollMs: number;
+    signal?: AbortSignal;
 };
 
 /** Validated md call: server options, image handling and signal. */
@@ -102,7 +111,6 @@ const CALL_OPTION_RULES: Record<keyof DoclingOptions, OptionRule> = {
     pdfBackend: (value) => isOneOf(value, PDF_BACKENDS),
     ocr: isBoolean,
     forceOcr: isBoolean,
-    // Open list: presets depend on server installation, unknown IDs are left to server.
     ocrEngine: (value) => typeof value === 'string' && value !== '',
 };
 
@@ -141,14 +149,36 @@ const CHECK_RULES: Record<keyof CallOptions, OptionRule> = {
     signal: isAbortSignal,
 };
 
+/** Rules for `waitForJob` options. */
+const POLL_RULES: Record<keyof PollOptions, OptionRule> = {
+    ...CHECK_RULES,
+    pollMs: isTimerDelay,
+};
+
+/** Rules for `runMarkdown` options: md call options plus `pollMs`. */
+const RUN_MARKDOWN_RULES: Record<keyof (MarkdownOptions & PollOptions), OptionRule> = {
+    ...MARKDOWN_RULES,
+    ...POLL_RULES,
+};
+
+/** Rules for `runDocument` options: document call options plus `pollMs`. */
+const RUN_DOCUMENT_RULES: Record<keyof (DocumentOptions & PollOptions), OptionRule> = {
+    ...DOCUMENT_RULES,
+    ...POLL_RULES,
+};
+
 /** Rules for factory configuration; the keys of `options` are checked separately. */
 const CONFIG_RULES: Record<keyof DoclingConfig, OptionRule> = {
     baseUrl: isHttpUrl,
     apiKey: (value) => typeof value === 'string' && value !== '',
     fetch: (value) => typeof value === 'function',
-    timeoutMs: isPositiveNumber,
+    timeoutMs: isTimerDelay,
+    pollMs: isTimerDelay,
     options: isPlainObject,
 };
+
+/** Default delay in ms between job helper status polls. */
+const DEFAULT_POLL_MS = 10;
 
 /** Job id of word characters and `-` only, so it cannot leave the URL path segment. */
 const MATCH_JOB_ID = /^[\w-]+$/;
@@ -164,6 +194,9 @@ const MATCH_TRAILING_SLASHES = /\/+$/;
 
 /** Matches HTTP or HTTPS protocol schemes. */
 const MATCH_HTTP_PROTOCOL = /^https?:$/;
+
+/** Maximum timer delay in ms (2^31 - 1); Node timers overflow above this and fire after 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /** Error message for a missing or malformed job object. */
 const INVALID_JOB = 'Expected the job object returned by submitMarkdown() or submitDocument()';
@@ -182,7 +215,14 @@ export function resolveConfig(config: unknown): ResolvedConfig {
     if (!isPlainObject(config)) {
         throw new TypeError('Invalid config: expected an object');
     }
-    const { baseUrl, apiKey, fetch: fetchFn, timeoutMs, options } = validateKeys<DoclingConfig>(config, CONFIG_RULES);
+    const {
+        baseUrl,
+        apiKey,
+        fetch: fetchFn,
+        timeoutMs,
+        pollMs = DEFAULT_POLL_MS,
+        options,
+    } = validateKeys<DoclingConfig>(config, CONFIG_RULES);
     if (baseUrl === undefined) {
         throw new TypeError(invalidValue('baseUrl'));
     }
@@ -195,45 +235,74 @@ export function resolveConfig(config: unknown): ResolvedConfig {
         ...(apiKey === undefined ? {} : { apiKey }),
         fetch: fetchFn ?? fetch,
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        pollMs,
         defaults,
     };
 }
 
 /**
- * Validates md call options over factory defaults.
+ * Merges and validates md call options against factory defaults.
  * @throws `TypeError` on invalid options.
  */
 export function resolveMarkdownCall(defaults: Readonly<ResolvedOptions>, options: unknown): MarkdownCall {
-    const {
-        signal,
-        images = 'placeholder',
-        imageOptions,
-        ...docling
-    } = validateKeys<MarkdownOptions>(callObject(options), MARKDOWN_RULES);
-    const output = resolveImageOutput(images, imageOptions);
-    return { options: { ...defaults, ...docling }, output, ...(signal === undefined ? {} : { signal }) };
+    return toMarkdownCall(defaults, validateKeys<MarkdownOptions>(callObject(options), MARKDOWN_RULES));
 }
 
 /**
- * Validates document call options over factory defaults.
+ * Merges and validates document call options against factory defaults.
  * @throws `TypeError` on invalid options.
  */
 export function resolveDocumentCall(defaults: Readonly<ResolvedOptions>, options: unknown): DocumentCall {
-    const {
-        signal,
-        images = 'embedded',
-        pageImages = false,
-        ...docling
-    } = validateKeys<DocumentOptions>(callObject(options), DOCUMENT_RULES);
-    return { options: { ...defaults, ...docling }, images, pageImages, ...(signal === undefined ? {} : { signal }) };
+    return toDocumentCall(defaults, validateKeys<DocumentOptions>(callObject(options), DOCUMENT_RULES));
 }
 
 /**
- * Validates signal-only call options (`check`, `capabilities`).
+ * Merges md call options and poll settings; `pollMs` defaults to factory `pollMs`.
+ * @throws `TypeError` on invalid options.
+ */
+export function resolveRunMarkdownCall(
+    defaults: Readonly<ResolvedOptions>,
+    defaultPollMs: number,
+    options: unknown,
+): MarkdownCall & PollCall {
+    const { pollMs = defaultPollMs, ...call } = validateKeys<MarkdownOptions & PollOptions>(
+        callObject(options),
+        RUN_MARKDOWN_RULES,
+    );
+    return { ...toMarkdownCall(defaults, call), pollMs };
+}
+
+/**
+ * Merges document call options and poll settings; `pollMs` defaults to factory `pollMs`.
+ * @throws `TypeError` on invalid options.
+ */
+export function resolveRunDocumentCall(
+    defaults: Readonly<ResolvedOptions>,
+    defaultPollMs: number,
+    options: unknown,
+): DocumentCall & PollCall {
+    const { pollMs = defaultPollMs, ...call } = validateKeys<DocumentOptions & PollOptions>(
+        callObject(options),
+        RUN_DOCUMENT_RULES,
+    );
+    return { ...toDocumentCall(defaults, call), pollMs };
+}
+
+/**
+ * Checks signal-only call options (`check`, `capabilities`).
  * @throws `TypeError` on invalid options.
  */
 export function resolveCheckOptions(options: unknown): CallOptions {
     return validateKeys<CallOptions>(callObject(options), CHECK_RULES);
+}
+
+/**
+ * Checks `waitForJob` options; `pollMs` defaults to factory `pollMs`.
+ * @throws `TypeError` on invalid options.
+ */
+export function resolvePollOptions(defaultPollMs: number, options: unknown): PollCall {
+    const { pollMs = defaultPollMs, signal } = validateKeys<PollOptions>(callObject(options), POLL_RULES);
+    return { pollMs, ...(signal === undefined ? {} : { signal }) };
 }
 
 /**
@@ -269,7 +338,7 @@ export function isJobId(value: unknown): value is string {
 }
 
 // -------------------------------------------------------------------
-// --- 4. Internal Functions
+// --- 4. Private Functions
 // -------------------------------------------------------------------
 
 /**
@@ -284,6 +353,22 @@ function callObject(options: unknown): Record<string, unknown> {
         throw new TypeError(OPTIONS_OBJECT_EXPECTED);
     }
     return options;
+}
+
+/**
+ * Splits validated md call options into server options over the defaults, image handling and signal.
+ * @throws `TypeError` on a missing, unexpected or invalid `imageOptions`.
+ */
+function toMarkdownCall(defaults: Readonly<ResolvedOptions>, options: Partial<MarkdownOptions>): MarkdownCall {
+    const { signal, images = 'placeholder', imageOptions, ...docling } = options;
+    const output = resolveImageOutput(images, imageOptions);
+    return { options: { ...defaults, ...docling }, output, ...(signal === undefined ? {} : { signal }) };
+}
+
+/** Splits validated document call options into server options over the defaults, image modes and signal. */
+function toDocumentCall(defaults: Readonly<ResolvedOptions>, options: Partial<DocumentOptions>): DocumentCall {
+    const { signal, images = 'embedded', pageImages = false, ...docling } = options;
+    return { options: { ...defaults, ...docling }, images, pageImages, ...(signal === undefined ? {} : { signal }) };
 }
 
 /**
@@ -317,6 +402,11 @@ function isPositiveNumber(value: unknown): value is number {
     return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
+/** Integer ms from 1 to `MAX_TIMEOUT_MS`; `AbortSignal.timeout` throws on fractions, `setTimeout` overflows above. */
+function isTimerDelay(value: unknown): value is number {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= MAX_TIMEOUT_MS;
+}
+
 /** 1-based ascending integer pair `[from, to]`. */
 function isPageRange(value: unknown): value is [number, number] {
     return (
@@ -344,7 +434,16 @@ function isAbortSignal(value: unknown): value is AbortSignal {
     return value instanceof AbortSignal;
 }
 
-/** Parseable HTTP or HTTPS URL. */
+/**
+ * **HTTP or HTTPS URL that routes can be appended to**.
+ *
+ * - no `?` or `#`, even empty ones: `${baseUrl}${route}` would put the route into the query or fragment
+ * - no user name or password: Node's `fetch` refuses such URLs; the key belongs in `apiKey`
+ */
 function isHttpUrl(value: unknown): value is string {
-    return typeof value === 'string' && URL.canParse(value) && MATCH_HTTP_PROTOCOL.test(new URL(value).protocol);
+    if (typeof value !== 'string' || !URL.canParse(value) || value.includes('?') || value.includes('#')) {
+        return false;
+    }
+    const url = new URL(value);
+    return MATCH_HTTP_PROTOCOL.test(url.protocol) && url.username === '' && url.password === '';
 }

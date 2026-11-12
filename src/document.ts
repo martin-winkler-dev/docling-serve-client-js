@@ -4,7 +4,7 @@
 // biome-ignore-all lint/style/useNamingConvention: mirrors docling-core's snake_case JSON
 
 // -------------------------------------------------------------------
-// --- 1. Document
+// --- 1. Types
 // -------------------------------------------------------------------
 
 /**
@@ -54,9 +54,7 @@ export type PageItem = {
     page_no: number;
 };
 
-// -------------------------------------------------------------------
-// --- 2. Shared Parts
-// -------------------------------------------------------------------
+// Shared Parts
 
 /** JSON pointer to another item, e.g. `{ $ref: '#/texts/12' }` or `{ $ref: '#/body' }`. */
 export type RefItem = { $ref: string };
@@ -182,9 +180,7 @@ type FloatingFields = {
     image: ImageRef | null;
 };
 
-// -------------------------------------------------------------------
-// --- 3. Groups
-// -------------------------------------------------------------------
+// Groups
 
 /** Docling's group kinds. */
 export type GroupLabel =
@@ -214,9 +210,7 @@ export type ListGroup = GroupItem & { label: 'list' };
 /** Run of texts that belong to one line or paragraph, e.g. with mixed formatting. */
 export type InlineGroup = GroupItem & { label: 'inline' };
 
-// -------------------------------------------------------------------
-// --- 4. Texts
-// -------------------------------------------------------------------
+// Texts
 
 /** Labels of plain `TextItem`s; other text labels have their own item type. */
 export type TextLabel =
@@ -284,9 +278,7 @@ export type AnyTextItem =
     | FieldValueItem
     | TextItem;
 
-// -------------------------------------------------------------------
-// --- 5. Tables
-// -------------------------------------------------------------------
+// Tables
 
 /** Table cell; offsets are 0-based and end-exclusive, spans repeat the cell in `grid`. */
 export type TableCell = {
@@ -331,9 +323,7 @@ export type TableItem = DocItem &
         annotations: (DescriptionAnnotation | MiscAnnotation)[];
     };
 
-// -------------------------------------------------------------------
-// --- 6. Pictures
-// -------------------------------------------------------------------
+// Pictures
 
 /**
  * **Model output on a picture**: description, classification, molecule or chart data.
@@ -379,9 +369,7 @@ export type PictureItem = DocItem &
         annotations: PictureAnnotation[];
     };
 
-// -------------------------------------------------------------------
-// --- 7. Forms and Key-Value Regions
-// -------------------------------------------------------------------
+// Forms and Key-Value Regions
 
 /** Cell of a key-value or form graph. */
 export type GraphCell = {

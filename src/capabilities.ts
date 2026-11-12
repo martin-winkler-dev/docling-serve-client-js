@@ -52,7 +52,7 @@ export function readCapabilities(body: unknown): Result<ServerCapabilities> {
 }
 
 // -------------------------------------------------------------------
-// --- 3. Internal Functions
+// --- 3. Private Functions
 // -------------------------------------------------------------------
 
 /** Pipeline stage; presets without a string `id` are dropped. */

@@ -18,8 +18,11 @@ assert.deepEqual(Object.keys(client).sort(), [
     'check',
     'convertDocument',
     'convertMarkdown',
+    'runDocument',
+    'runMarkdown',
     'submitDocument',
     'submitMarkdown',
+    'waitForJob',
 ]);
 const md = await client.convertMarkdown(new Uint8Array());
 assert.equal(md.ok || md.error.code, 'invalid_input');
@@ -36,6 +39,13 @@ const job = await client.check({ kind: 'document', id: 'x' });
 assert.equal(job.ok || job.error.code, 'network');
 const invalidJob = await client.check({ id: 'x' });
 assert.equal(invalidJob.ok || invalidJob.error.code, 'invalid_input');
+const ran = await client.runDocument(new Uint8Array());
+assert.equal(ran.ok || ran.error.code, 'invalid_input');
+const waited = await client.waitForJob({ kind: 'document', id: 'x' }, { pollMs: 1 });
+assert.equal(waited.ok || waited.error.code, 'network');
+await assert.rejects(client.runMarkdown(new Uint8Array(), { pollMs: 0 }), TypeError);
+await assert.rejects(client.convertDocument(new Uint8Array(), { pollMs: 10 }), TypeError);
+assert.throws(() => createDoclingClient({ baseUrl: 'http://x', pollMs: 1.5 }), TypeError);
 assert.throws(() => createDoclingClient({ baseUrl: 'nope' }), TypeError);
 assert.throws(() => createDoclingClient({ baseUrl: 'http://x', options: { images: 'none' } }), TypeError);
 assert.equal(isSmallImage({ width: 88, height: 32 }), true);

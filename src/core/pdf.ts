@@ -25,7 +25,6 @@ export function isPdf(bytes: unknown): bytes is Uint8Array {
     }
     const head = bytes.subarray(0, HEADER_SEARCH_LENGTH);
     for (let i = 0; i + 5 <= head.length; i++) {
-        // %PDF-
         if (
             head[i] === 0x25 &&
             head[i + 1] === 0x50 &&

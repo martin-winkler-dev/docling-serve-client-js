@@ -104,7 +104,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     });
 
     test(
-        'contract: the server accepts every option with a non-default value, for both formats',
+        'verifies server accepts all non-default options across markdown and document submissions',
         async () => {
             // A broken PDF fails before any model loads, so this only checks that no field is rejected (422).
             const broken = new TextEncoder().encode('%PDF-1.7 truncated');
@@ -140,7 +140,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'page images: moved out of the document as PNG bytes; an image converts as one page',
+        'extracts page images as PNG byte arrays and converts image input as a single page',
         async () => {
             const { document, pageImages, warnings } = dataOf(
                 await firstPage.convertDocument(textPdf, {
@@ -173,12 +173,12 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertMarkdown: a page range; docling md is returned unchanged',
+        'converts markdown within configured pageRange and preserves raw docling markdown output',
         async () => {
             const { markdown, images, warnings, versions } = dataOf(await firstPage.convertMarkdown(textPdf));
             expect(markdown).toContain('Sample Report');
             expect(markdown).not.toContain('Second Page');
-            // docling escapes HTML entities; the client no longer repairs them
+            // docling escapes HTML entities in markdown output
             expect(markdown).toContain('Research &amp; Development');
             expect(images).toEqual([]);
             expect(warnings).toEqual([]);
@@ -188,7 +188,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertMarkdown: the pypdfium2 backend reads the text too',
+        'converts markdown successfully using pypdfium2 pdf backend',
         async () => {
             const { markdown } = dataOf(await docling.convertMarkdown(textPdf, { pdfBackend: 'pypdfium2' }));
             expect(markdown).toContain('Sample Report');
@@ -198,7 +198,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertMarkdown: headingHierarchy nests numbered headings; false keeps them flat',
+        'nests numbered headings when headingHierarchy is enabled and flattens levels when disabled',
         async () => {
             const nested = dataOf(await docling.convertMarkdown(imagePdf, { images: 'none' })).markdown;
             expect(headingLevel(nested, SAMPLE_TEXT.section)).toBeGreaterThan(0);
@@ -214,7 +214,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertMarkdown: images placeholder marks pictures, none removes them',
+        'replaces images with placeholders or removes them completely based on images option',
         async () => {
             const placeholder = dataOf(await docling.convertMarkdown(imagePdf));
             expect(placeholder.markdown.match(/<!-- image -->/g) ?? []).toHaveLength(2);
@@ -230,7 +230,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertMarkdown: images extract returns PNG bytes linked under the prefix; omitSmall drops the badge',
+        'extracts image byte payloads with prefix links and filters small icons when omitSmall is enabled',
         async () => {
             const all = dataOf(
                 await docling.convertMarkdown(imagePdf, {
@@ -261,7 +261,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertDocument: embedded pictures carry PNG data URIs; texts are typed by label',
+        'converts document with embedded PNG data URIs and labeled text elements',
         async () => {
             const { document, warnings, versions } = dataOf(await docling.convertDocument(imagePdf));
             expect(document.schema_name).toBe('DoclingDocument');
@@ -287,7 +287,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'convertDocument: placeholder keeps picture items without image data',
+        'preserves picture items without image data URIs when placeholder mode is enabled',
         async () => {
             const { document } = dataOf(await docling.convertDocument(imagePdf, { images: 'placeholder' }));
             expect(document.pictures).toHaveLength(2);
@@ -300,7 +300,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         TIMEOUT,
     );
 
-    test('enrichments: formula and code models run', async () => {
+    test('executes formula and code enrichment pipeline models successfully', async () => {
         const res = await firstPage.convertMarkdown(textPdf, {
             formulaEnrichment: true,
             codeEnrichment: true,
@@ -309,7 +309,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     }, 600_000);
 
     test(
-        'submitMarkdown + check: the job object survives a JSON round trip',
+        'submits asynchronous markdown job and retrieves completed result across JSON serialization',
         async () => {
             const job = dataOf(
                 await docling.submitMarkdown(imagePdf, {
@@ -333,7 +333,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'submitMarkdown + check: placeholder and none apply when the result is picked up',
+        'applies placeholder and none image output modes when polling submitted markdown jobs',
         async () => {
             const placeholder = dataOf(await waitForMarkdown(dataOf(await docling.submitMarkdown(imagePdf))));
             expect(placeholder.status).toBe('done');
@@ -352,7 +352,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'submitDocument + check: embedded and placeholder pictures',
+        'submits document jobs and checks completion for embedded and placeholder picture modes',
         async () => {
             const job = dataOf(await docling.submitDocument(imagePdf));
             // separate asserts: toMatchObject with an asymmetric matcher replaces the matched field in `job` (Bun 1.4)
@@ -379,7 +379,53 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
     );
 
     test(
-        'broken PDF -> conversion_failed, for both formats',
+        'executes runDocument with identical output to convertDocument without the 2 s sync poll interval',
+        async () => {
+            // warm-up: the first conversion loads the models
+            dataOf(await firstPage.convertDocument(textPdf));
+            const convertStart = performance.now();
+            const converted = dataOf(await firstPage.convertDocument(textPdf));
+            const convertMs = performance.now() - convertStart;
+            const runStart = performance.now();
+            const ran = dataOf(await firstPage.runDocument(textPdf));
+            const runMs = performance.now() - runStart;
+            expect(ran.document).toEqual(converted.document);
+            expect(ran.warnings).toEqual(converted.warnings);
+            expect(ran.settings).toEqual(converted.settings);
+            // the sync endpoint answers on a 2 s poll tick; the job helper polls every 10 ms
+            expect(runMs).toBeLessThan(convertMs);
+        },
+        TIMEOUT,
+    );
+
+    test(
+        'executes runMarkdown and waits for serialized markdown jobs with matching conversion output',
+        async () => {
+            const converted = dataOf(await firstPage.convertMarkdown(textPdf));
+            const ran = dataOf(await firstPage.runMarkdown(textPdf));
+            expect(ran.markdown).toBe(converted.markdown);
+            const job = dataOf(await firstPage.submitMarkdown(textPdf, { images: 'none' }));
+            const waited = dataOf(await docling.waitForJob(JSON.parse(JSON.stringify(job)), { pollMs: 50 }));
+            expect(waited.markdown).toContain('Sample Report');
+            expect(waited.markdown).not.toContain('Second Page');
+        },
+        TIMEOUT,
+    );
+
+    test(
+        'returns conversion_failed for corrupted PDF and not_found for non-existent job in helpers',
+        async () => {
+            const broken = new TextEncoder().encode('%PDF-1.7 truncated garbage');
+            const ran = await docling.runDocument(broken);
+            expect(ran.ok || ran.error.code).toBe('conversion_failed');
+            const waited = await docling.waitForJob({ kind: 'document', id: 'does-not-exist' });
+            expect(waited.ok || waited.error.code).toBe('not_found');
+        },
+        TIMEOUT,
+    );
+
+    test(
+        'returns conversion_failed for corrupted PDF inputs in markdown and document endpoints',
         async () => {
             const broken = new TextEncoder().encode('%PDF-1.7 truncated garbage');
             const markdown = await docling.convertMarkdown(broken);
@@ -390,14 +436,14 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         TIMEOUT,
     );
 
-    test('unknown job id -> not_found, for both job kinds', async () => {
+    test('returns not_found when checking non-existent markdown and document jobs', async () => {
         const markdown = await docling.check({ kind: 'markdown', id: 'does-not-exist', output: { images: 'none' } });
         expect(markdown.ok || markdown.error.code).toBe('not_found');
         const document = await docling.check({ kind: 'document', id: 'does-not-exist' });
         expect(document.ok || document.error.code).toBe('not_found');
     });
 
-    test('capabilities: returns server versions, stages and features', async () => {
+    test('queries server capabilities returning versions, processing stages, and output formats', async () => {
         const capabilities = dataOf(await docling.capabilities());
         expect(capabilities.versions['docling-serve']).toBeString();
         expect(capabilities.stages.ocr?.option).toBe('ocr_preset');
@@ -405,7 +451,7 @@ describe.skipIf(!E2E)('docling-serve (e2e)', () => {
         expect(capabilities.outputFormats).toEqual(expect.arrayContaining(['md', 'json']));
     });
 
-    test('unreachable server -> network', async () => {
+    test('returns network error when server host is unreachable', async () => {
         const unreachable = createDoclingClient({ baseUrl: 'http://127.0.0.1:1' });
         const markdown = await unreachable.convertMarkdown(textPdf);
         expect(markdown.ok || markdown.error.code).toBe('network');

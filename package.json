@@ -1,7 +1,7 @@
 {
   "name": "docling-serve-client",
-  "version": "0.5.0",
-  "description": "Typed docling-serve client: PDF to docling Markdown or DoclingDocument JSON, sync and async. In-memory, zero-dependency, never throws.",
+  "version": "0.6.0",
+  "description": "Typed docling-serve client: PDF to docling Markdown or DoclingDocument JSON, as single request, job or polling job helper. In-memory, zero-dependency, never throws.",
   "keywords": [
     "pdf",
     "markdown",

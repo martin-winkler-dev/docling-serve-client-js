@@ -135,7 +135,7 @@ export function readText(value: unknown): string | undefined {
 }
 
 // -------------------------------------------------------------------
-// --- 4. Internal Functions
+// --- 4. Private Functions
 // -------------------------------------------------------------------
 
 /**

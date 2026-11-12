@@ -113,7 +113,6 @@ export function readPngSize(bytes: Uint8Array): ImageSize | undefined {
     if (!(bytes instanceof Uint8Array) || bytes.length < 24) {
         return undefined;
     }
-    // IHDR holds 32-bit width and height at offsets 16 and 20.
     const isPng =
         PNG_SIGNATURE.every((byte, i) => bytes[i] === byte) && PNG_IHDR.every((byte, i) => bytes[12 + i] === byte);
     if (!isPng) {
@@ -154,7 +153,6 @@ export function extractImages(markdown: string, options: Required<ImageOptions>)
         }
         const size = readPngSize(bytes);
         if (options.omitSmall && size !== undefined && isSmallImage(size)) {
-            // Marker, so removing it below also normalizes surrounding blank lines.
             output += OMITTED_IMAGE;
             continue;
         }
@@ -263,7 +261,7 @@ export function removeImagePlaceholders(markdown: string): string {
 }
 
 // -------------------------------------------------------------------
-// --- 4. Internal Functions
+// --- 4. Private Functions
 // -------------------------------------------------------------------
 
 /**

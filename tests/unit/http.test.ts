@@ -13,7 +13,7 @@ function fetchOf(fn: () => Response | Promise<Response>) {
 }
 
 describe('fetchJson', () => {
-    test('parses JSON on 2xx', async () => {
+    test('parses JSON payload on successful 2xx response', async () => {
         expect(
             await fetchJson(
                 fetchOf(() => Response.json({ a: 1 })),
@@ -23,7 +23,7 @@ describe('fetchJson', () => {
         ).toEqual({ ok: true, data: { a: 1 } });
     });
 
-    test('maps non-2xx with FastAPI string detail', async () => {
+    test('maps non-2xx response with string error detail to http error', async () => {
         const res = await fetchJson(
             fetchOf(() => Response.json({ detail: 'nope' }, { status: 404 })),
             'u',
@@ -32,7 +32,7 @@ describe('fetchJson', () => {
         expect(res).toEqual({ ok: false, error: { code: 'http', message: 'HTTP 404: nope', status: 404 } });
     });
 
-    test('maps non-2xx with validation detail list and plain text bodies', async () => {
+    test('maps non-2xx responses with validation error lists and plain text bodies', async () => {
         const list = await fetchJson(
             fetchOf(() => Response.json({ detail: [{ msg: 'bad' }] }, { status: 422 })),
             'u',
@@ -53,7 +53,7 @@ describe('fetchJson', () => {
         expect(!empty.ok && empty.error.message).toBe('HTTP 502: no response body');
     });
 
-    test('maps invalid JSON on 2xx', async () => {
+    test('maps invalid JSON in 2xx response to invalid_response error', async () => {
         const res = await fetchJson(
             fetchOf(() => new Response('<html>')),
             'u',
@@ -65,7 +65,7 @@ describe('fetchJson', () => {
         });
     });
 
-    test('quotes the first 200 characters of a non-JSON 2xx body, whitespace collapsed', async () => {
+    test('truncates non-JSON 2xx response body to 200 characters with collapsed whitespace', async () => {
         /** Error message for a 200 answer with `body`. */
         async function messageOf(body: string) {
             const res = await fetchJson(
@@ -83,7 +83,7 @@ describe('fetchJson', () => {
         expect(await messageOf(`x${'y'.repeat(300)}`)).toBe(`Response body is not valid JSON: x${'y'.repeat(199)}`);
     });
 
-    test('maps network errors without throwing, including the cause', async () => {
+    test('maps network exceptions to network error result including error cause', async () => {
         const net = await fetchJson(
             fetchOf(() => {
                 throw new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:1') });
@@ -106,7 +106,7 @@ describe('fetchJson', () => {
         expect(!thrownString.ok && thrownString.error).toEqual({ code: 'network', message: 'weird' });
     });
 
-    test('maps a body too large for a string or for memory to invalid_response', async () => {
+    test('maps oversized response bodies or memory errors to invalid_response error', async () => {
         const tooLong = Object.assign(new Error('Cannot create a string longer than 2147483647 characters'), {
             code: 'ERR_STRING_TOO_LONG',
         });
@@ -135,7 +135,7 @@ describe('fetchJson', () => {
         }
     });
 
-    test('maps an aborted signal to aborted, whatever the abort reason', async () => {
+    test('maps aborted signal to aborted error regardless of abort reason', async () => {
         /** Mock fetch that throws immediately if signal was aborted. */
         async function rejectOnAbortFetch(_url: string, init: RequestInit) {
             init.signal?.throwIfAborted();

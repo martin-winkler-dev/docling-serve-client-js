@@ -8,12 +8,18 @@ import { findTruncatedXref } from './core/pdf.js';
 import { ERR, fail, ok } from './core/result.js';
 import { PAGE_IMAGE_SCALE } from './images.js';
 import {
+    type DocumentCall,
     isJobId,
+    type MarkdownCall,
+    type PollCall,
     type ResolvedOptions,
     resolveCheckOptions,
     resolveConfig,
     resolveDocumentCall,
     resolveMarkdownCall,
+    resolvePollOptions,
+    resolveRunDocumentCall,
+    resolveRunMarkdownCall,
     validateJob,
 } from './options.js';
 import { type DoclingFailureInfo, readDocument, readFailure, readMarkdown, readText } from './response.js';
@@ -108,13 +114,14 @@ const MAX_SHOWN_ID_LENGTH = 100;
 /**
  * **docling-serve client factory**.
  *
- * - validates configuration once; its only state is the cached server versions
- * - returned functions resolve to `Result`; invalid options reject with a `TypeError` before any request
+ * - validates configuration once; its only state is cached server versions
+ * - returned functions resolve to `Result`; invalid options reject with `TypeError` before any request
  * - `timeoutMs` limits every request except `/version`, which has its own limit
+ * - `pollMs` sets default delay between job helper status polls, overridable per call
  * @throws `TypeError` on invalid configuration.
  */
 export function createDoclingClient(config: DoclingConfig): DoclingClient {
-    const { baseUrl, apiKey, fetch: fetchFn, timeoutMs, defaults } = resolveConfig(config);
+    const { baseUrl, apiKey, fetch: fetchFn, timeoutMs, pollMs, defaults } = resolveConfig(config);
     const headers: Record<string, string> = apiKey === undefined ? {} : { 'X-Api-Key': apiKey };
     /** Pending or resolved `/version` answer shared by all calls of this client. */
     let versionsCache: Promise<ServerVersions | null> | undefined;
@@ -125,6 +132,9 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
         submitMarkdown,
         submitDocument,
         check: check as DoclingClient['check'],
+        runMarkdown,
+        runDocument,
+        waitForJob: waitForJob as DoclingClient['waitForJob'],
         capabilities,
     };
 
@@ -165,6 +175,52 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
     /** Starts an async md conversion; the job carries the image handling for `check` and the sent settings. */
     async function submitMarkdown(input: ConvertInput, options?: unknown): Promise<Result<MarkdownJob>> {
         const call = resolveMarkdownCall(defaults, options);
+        return await startMarkdownJob(input, call);
+    }
+
+    /** Starts an async document conversion; page images need no job field, `check` moves any it finds. */
+    async function submitDocument(input: ConvertInput, options?: unknown): Promise<Result<DocumentJob>> {
+        const call = resolveDocumentCall(defaults, options);
+        return await startDocumentJob(input, call);
+    }
+
+    /** Submits an md job and polls it until done; resolves like `convertMarkdown`, with the job's settings. */
+    async function runMarkdown(
+        input: ConvertInput,
+        options?: unknown,
+    ): Promise<Result<WithSettings<ConvertedMarkdown>>> {
+        const call = resolveRunMarkdownCall(defaults, pollMs, options);
+        const job = await startMarkdownJob(input, call);
+        if (!job.ok) {
+            return job;
+        }
+        const done = await pollUntilDone<ConvertedMarkdown>(job.data, call);
+        return done.ok ? ok({ ...done.data, settings: job.data.settings }) : done;
+    }
+
+    /** Submits a document job and polls it until done; resolves like `convertDocument`, with the job's settings. */
+    async function runDocument(
+        input: ConvertInput,
+        options?: unknown,
+    ): Promise<Result<WithSettings<ConvertedDocument>>> {
+        const call = resolveRunDocumentCall(defaults, pollMs, options);
+        const job = await startDocumentJob(input, call);
+        if (!job.ok) {
+            return job;
+        }
+        const done = await pollUntilDone<ConvertedDocument>(job.data, call);
+        return done.ok ? ok({ ...done.data, settings: job.data.settings }) : done;
+    }
+
+    /** Polls an existing job until done; the job is validated and copied once, so later changes to it have no effect. */
+    async function waitForJob(job: JobRef, options?: unknown): Promise<Result<ConvertedMarkdown | ConvertedDocument>> {
+        const call = resolvePollOptions(pollMs, options);
+        const valid = validateJob(job);
+        return valid.ok ? pollUntilDone(valid.data, call) : valid;
+    }
+
+    /** Posts an md job for a validated call. */
+    async function startMarkdownJob(input: ConvertInput, call: MarkdownCall): Promise<Result<MarkdownJob>> {
         const fields: FormatFields = { format: 'md', embedImages: call.output.images === 'extract', pageImages: false };
         const task = await submit(input, call.options, fields, call.signal);
         return task.ok
@@ -172,9 +228,8 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
             : task;
     }
 
-    /** Starts an async document conversion; page images need no job field, `check` moves any it finds. */
-    async function submitDocument(input: ConvertInput, options?: unknown): Promise<Result<DocumentJob>> {
-        const call = resolveDocumentCall(defaults, options);
+    /** Posts a document job for a validated call. */
+    async function startDocumentJob(input: ConvertInput, call: DocumentCall): Promise<Result<DocumentJob>> {
         const fields: FormatFields = {
             format: 'json',
             embedImages: call.images === 'embedded',
@@ -185,22 +240,51 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
     }
 
     /**
-     * **Polls a job and fetches its result when done**.
+     * **Polls a job until done**: waits `pollMs` after each `queued` or `running` status.
      *
-     * - unknown job id: `not_found` with `Unknown job id`
-     * - result fetched more than `DOCLING_SERVE_RESULT_REMOVAL_DELAY` (default 300 s) ago or expired: `not_found` with
-     *   `Result already fetched or expired`
+     * - `job` must be validated: it is polled as is, without a new check per poll
+     * - first poll runs immediately; at most one request in flight
+     * - resolves to `done` result without `status`, or first error unchanged
+     * - abort during wait resolves to `aborted` immediately; abort during request returns request error
      */
+    async function pollUntilDone<T>(job: JobRef, { pollMs: waitMs, signal }: PollCall): Promise<Result<T>> {
+        for (;;) {
+            const state = await fetchJobState(job, signal);
+            if (!state.ok) {
+                return state;
+            }
+            if (state.data.status === 'done') {
+                const { status: _done, ...result } = state.data;
+                return ok(result as T);
+            }
+            if (!(await sleep(waitMs, signal))) {
+                return fail(ERR.ABORTED(`Aborted while waiting for job ${job.id}`));
+            }
+        }
+    }
+
+    /** Polls a job and fetches its result when done; a malformed job is `invalid_input` without a request. */
     async function check(
         job: JobRef,
         options?: unknown,
     ): Promise<Result<JobState<ConvertedMarkdown | ConvertedDocument>>> {
         const { signal } = resolveCheckOptions(options);
         const valid = validateJob(job);
-        if (!valid.ok) {
-            return valid;
-        }
-        const { id } = valid.data;
+        return valid.ok ? fetchJobState(valid.data, signal) : valid;
+    }
+
+    /**
+     * **Status request for a validated job; result download when done**.
+     *
+     * - unknown job id: `not_found` with `Unknown job id`; also once docling-serve deleted the task,
+     *   `DOCLING_SERVE_RESULT_REMOVAL_DELAY` (default 300 s) after the first result fetch
+     * - task deleted between the status poll and the result fetch: `not_found` with `Result already fetched or expired`
+     */
+    async function fetchJobState(
+        job: JobRef,
+        signal: AbortSignal | undefined,
+    ): Promise<Result<JobState<ConvertedMarkdown | ConvertedDocument>>> {
+        const { id } = job;
         const res = await get(`/v1/status/poll/${id}`, signal);
         if (!res.ok) {
             const error =
@@ -227,9 +311,8 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
                             : result.error;
                     return failWithVersions(error);
                 }
-                const checked = valid.data;
                 const output =
-                    checked.kind === 'markdown' ? readMarkdown(result.data, checked.output) : readDocument(result.data);
+                    job.kind === 'markdown' ? readMarkdown(result.data, job.output) : readDocument(result.data);
                 const done = await withVersions<ConvertedMarkdown | ConvertedDocument>(output);
                 return done.ok ? ok({ status: 'done', ...done.data }) : done;
             }
@@ -372,8 +455,32 @@ export function createDoclingClient(config: DoclingConfig): DoclingClient {
 }
 
 // -------------------------------------------------------------------
-// --- 4. Internal Functions
+// --- 4. Private Functions
 // -------------------------------------------------------------------
+
+/**
+ * **Waits `ms` unless `signal` aborts**.
+ *
+ * - resolves `true` after the wait, `false` at once on abort (also when already aborted)
+ * - clears its timer and removes its listener either way
+ */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+    if (signal?.aborted) {
+        return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve(true);
+        }, ms);
+        /** Ends the wait early. */
+        function onAbort() {
+            clearTimeout(timer);
+            resolve(false);
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
 
 /** Caller signal combined with a `timeoutMs` limit; either alone when the other is unset. */
 function withTimeout(signal: AbortSignal | undefined, timeoutMs: number | undefined): AbortSignal | undefined {
@@ -412,6 +519,7 @@ function readInputFormat(input: unknown): Result<InputFormat> {
  * - images: `image_export_mode=embedded` when picture data or page images are requested, else `placeholder`;
  *   `include_images` and `include_page_images` pick which data docling sends
  * - `images_scale` fixed at `PAGE_IMAGE_SCALE`; it sets picture and page image resolution only, OCR has its own scale
+ * - PDF input: `forceOcr` enables OCR even with `ocr: false` (docling skips `force_ocr` when `do_ocr=false`)
  * - image input: OCR always on and never full-page, whatever `ocr` and `forceOcr` say
  * - model presets pinned; a preset of a disabled stage is not sent
  * - fields docling-serve would default silently are sent with that default
@@ -421,7 +529,6 @@ function buildSettings(
     options: ResolvedOptions,
     { format, embedImages, pageImages }: FormatFields,
 ): DoclingSettings {
-    // Image has no text layer: without OCR it yields no text, and full-page OCR merges words.
     const isImage = fromFormat === 'image';
     const isMarkdown = format === 'md';
     return {
@@ -433,7 +540,7 @@ function buildSettings(
         imagesScale: PAGE_IMAGE_SCALE,
         mdCompactTables: isMarkdown ? true : null,
         mdPageBreakPlaceholder: isMarkdown ? '' : null,
-        doOcr: isImage || options.ocr,
+        doOcr: isImage || options.ocr || options.forceOcr,
         forceOcr: !isImage && options.forceOcr,
         ocrPreset: options.ocrEngine,
         ocrLang: [...(options.ocrLang ?? [])],
@@ -467,7 +574,6 @@ function buildSettings(
  */
 function buildFormData(input: ConvertInput, { mimeType, fileName }: InputFormat, settings: DoclingSettings): FormData {
     const form = new FormData();
-    // Blob does not accept SharedArrayBuffer-backed input: copy only that into a fresh ArrayBuffer.
     const bytes = input.buffer instanceof ArrayBuffer ? (input as Uint8Array<ArrayBuffer>) : new Uint8Array(input);
     form.append('files', new Blob([bytes], { type: mimeType }), fileName);
     for (const [key, value] of Object.entries(settings)) {

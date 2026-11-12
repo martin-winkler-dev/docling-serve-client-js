@@ -10,19 +10,19 @@ function pdfBytes(prefix = '') {
 }
 
 describe('isPdf', () => {
-    test('accepts PDF magic at start or within first 1024 bytes', () => {
+    test('detects PDF magic header at buffer start or within first 1024 bytes', () => {
         expect(isPdf(pdfBytes())).toBe(true);
         expect(isPdf(pdfBytes('junk'))).toBe(true);
         expect(isPdf(Buffer.from(pdfBytes()))).toBe(true);
     });
 
-    test('a header starting at offset 1023 counts, one at 1024 does not', () => {
+    test('detects header at byte offset 1023 and rejects header starting at byte 1024', () => {
         expect(isPdf(pdfBytes('x'.repeat(1023)))).toBe(true);
         expect(isPdf(pdfBytes('x'.repeat(1023)).subarray(0, 1028))).toBe(true);
         expect(isPdf(pdfBytes('x'.repeat(1023)).subarray(0, 1027))).toBe(false);
     });
 
-    test('rejects non-PDF, empty and non-Uint8Array input', () => {
+    test('returns false for empty buffers, non-PDF payloads, and non-Uint8Array inputs', () => {
         expect(isPdf(new Uint8Array())).toBe(false);
         expect(isPdf(new TextEncoder().encode('hello'))).toBe(false);
         expect(isPdf(pdfBytes('x'.repeat(1024)))).toBe(false);
@@ -39,39 +39,39 @@ function pdfWithTail(tail: string, size = 4096): Uint8Array {
 }
 
 describe('findTruncatedXref', () => {
-    test('offset past the end or exactly at the end: truncated; inside the file: complete', () => {
+    test('identifies truncated files when startxref offset matches or exceeds file size', () => {
         expect(findTruncatedXref(pdfWithTail('startxref\n5000\n%%EOF\n'))).toBe(5000);
         expect(findTruncatedXref(pdfWithTail('startxref\n4096\n%%EOF\n'))).toBe(4096);
         expect(findTruncatedXref(pdfWithTail('startxref\n4095\n%%EOF\n'))).toBeUndefined();
         expect(findTruncatedXref(pdfWithTail('startxref\n120\n%%EOF\n'))).toBeUndefined();
     });
 
-    test('incremental updates: only the last startxref counts', () => {
+    test('evaluates only the final startxref entry in documents with incremental updates', () => {
         expect(
             findTruncatedXref(pdfWithTail('startxref\n9999\n%%EOF\nxref\nstartxref\n3000\n%%EOF\n')),
         ).toBeUndefined();
         expect(findTruncatedXref(pdfWithTail('startxref\n100\n%%EOF\nstartxref\n9999\n%%EOF\n'))).toBe(9999);
     });
 
-    test('CRLF and CR line endings, extra spaces and bytes after %%EOF', () => {
+    test('handles CRLF, CR, whitespace, and trailing garbage after %%EOF', () => {
         expect(findTruncatedXref(pdfWithTail('startxref\r\n7000\r\n%%EOF\r\n'))).toBe(7000);
         expect(findTruncatedXref(pdfWithTail('startxref\r7000\r%%EOF'))).toBe(7000);
         expect(findTruncatedXref(pdfWithTail('startxref  \n  7000 \n%%EOF\n\0\0 garbage'))).toBe(7000);
         expect(findTruncatedXref(pdfWithTail('startxref\r\n100\r\n%%EOF\r\n'))).toBeUndefined();
     });
 
-    test('no startxref, or startxref without digits: cannot judge', () => {
+    test('returns undefined when startxref token is absent or non-numeric', () => {
         expect(findTruncatedXref(pdfWithTail('%%EOF\n'))).toBeUndefined();
         expect(findTruncatedXref(pdfWithTail('startxref\n%%EOF\n'))).toBeUndefined();
         expect(findTruncatedXref(new TextEncoder().encode('%PDF-1.7\n...'))).toBeUndefined();
         expect(findTruncatedXref(new Uint8Array())).toBeUndefined();
     });
 
-    test('only the last 2 KB are read: an earlier startxref is ignored', () => {
+    test('inspects only the trailing 2 KB window and ignores earlier startxref tokens', () => {
         expect(findTruncatedXref(pdfWithTail(`startxref\n999999\n${' '.repeat(3000)}`, 8192))).toBeUndefined();
     });
 
-    test('non-ASCII bytes in the tail are read as latin1', () => {
+    test('decodes trailing non-ASCII bytes using latin1 encoding without failure', () => {
         const tail = new TextEncoder().encode('startxref\n500\n');
         expect(findTruncatedXref(new Uint8Array([...pdfWithTail('', 100), 0xff, 0xfe, ...tail]))).toBe(500);
     });

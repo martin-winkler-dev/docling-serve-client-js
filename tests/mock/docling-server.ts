@@ -28,6 +28,8 @@ export type MockDoclingServer = {
     requests: MockRequest[];
     /** The next request answers with this response, or rejects with this error (like a network failure). */
     failNext(answer: Response | Error): void;
+    /** The next request stays open this many ms before it is answered; an abort meanwhile rejects it like `fetch`. */
+    delayNext(ms: number): void;
 };
 
 /** One request as the mock received it. */
@@ -56,8 +58,8 @@ export type MockBlock =
 type MockTask = {
     id: string;
     polls: number;
-    /** Conversion result, returned by `/v1/result/:id` once the task is done. */
-    result: ConvertResult;
+    /** Conversion result, returned by `/v1/result/:id` once the task is done; `null` after a worker error. */
+    result: ConvertResult | null;
 };
 
 /** Body of docling-serve's `ConvertDocumentResponse`. */
@@ -109,8 +111,27 @@ export const MOCK_PAGES: MockBlock[][] = [
     ],
 ];
 
-/** A PDF containing these bytes makes the mock report a failed conversion. */
+/**
+ * **A PDF containing these bytes makes the mock report a failed conversion**.
+ *
+ * - like docling-serve 1.38.2: the result body has `status: "failure"` and `errors[]`, on both endpoints
+ * - on the job path the task itself still reports `success`
+ */
 export const BROKEN_PDF_MARKER = '%%MOCK_BROKEN%%';
+
+/**
+ * **A PDF containing these bytes makes the mock worker raise an exception**.
+ *
+ * - job path: task `failure` with `error_message`; `/v1/result/:id` answers 404, no result was stored
+ * - sync endpoint: 404 with the same "Task result not found" detail, like docling-serve 1.38.2
+ */
+export const WORKER_ERROR_MARKER = '%%MOCK_WORKER_ERROR%%';
+
+/** `error_message` of a task whose worker raised an exception. */
+export const WORKER_ERROR_MESSAGE = 'Mock: worker crashed';
+
+/** docling-serve's 404 detail for a task without a stored result. */
+export const NO_RESULT_DETAIL = 'Task result not found. Please wait for a completion status.';
 
 /** What the mock answers on `GET /version`, shaped like docling-serve's (incl. its `plaform` typo). */
 export const MOCK_VERSIONS = {
@@ -249,16 +270,21 @@ const MATCH_INTEGER = /^\d+$/;
  *   `/v1/status/poll/:id`, `/v1/result/:id`
  * - 401 without the configured api key (health and version stay open), 422 on invalid form fields
  * - an aborted request signal rejects like `fetch`; `failNext` answers take precedence over every route
+ * - `delayNext` holds the next request open before it is answered
  */
 export function createMockDoclingServer(options: MockServerOptions = {}): MockDoclingServer {
     const requests: MockRequest[] = [];
     const answers: (Response | Error)[] = [];
+    const delays: number[] = [];
     const tasks = new Map<string, MockTask>();
 
     return {
         requests,
         failNext(answer) {
             answers.push(answer);
+        },
+        delayNext(ms) {
+            delays.push(ms);
         },
         fetch: mockFetch as typeof fetch,
     };
@@ -273,6 +299,10 @@ export function createMockDoclingServer(options: MockServerOptions = {}): MockDo
         const path = new URL(request.url).pathname;
         const form = request.method === 'POST' ? ((await request.formData()) as FormData) : undefined;
         requests.push({ method: request.method, path, headers: request.headers, ...(form ? { form } : {}) });
+        const delay = delays.shift();
+        if (delay !== undefined) {
+            await waitOrAbort(delay, request.signal);
+        }
         if (request.signal.aborted) {
             throw request.signal.reason;
         }
@@ -302,7 +332,9 @@ export function createMockDoclingServer(options: MockServerOptions = {}): MockDo
             }
             const result = await convert(form);
             if (path === '/v1/convert/file') {
-                return Response.json(result);
+                return result === null
+                    ? Response.json({ detail: NO_RESULT_DETAIL }, { status: 404 })
+                    : Response.json(result);
             }
             const task: MockTask = { id: `mock-task-${tasks.size + 1}`, polls: 0, result };
             tasks.set(task.id, task);
@@ -315,12 +347,9 @@ export function createMockDoclingServer(options: MockServerOptions = {}): MockDo
             return Response.json(taskStatus(task));
         }
         if (request.method === 'GET' && route === 'result' && task) {
-            return task.polls >= POLLS_UNTIL_DONE
+            return task.polls >= POLLS_UNTIL_DONE && task.result !== null
                 ? Response.json(task.result)
-                : Response.json(
-                      { detail: 'Task result not found. Please wait for a completion status.' },
-                      { status: 404 },
-                  );
+                : Response.json({ detail: NO_RESULT_DETAIL }, { status: 404 });
         }
         return Response.json({ detail: route ? 'Task not found.' : 'Not Found' }, { status: 404 });
     }
@@ -411,10 +440,19 @@ function validateForm(form: FormData): object[] {
     return errors;
 }
 
-/** Conversion result; only the requested `to_formats` are filled, a broken PDF fails with one error item. */
-async function convert(form: FormData): Promise<ConvertResult> {
+/**
+ * **Conversion result; only the requested `to_formats` are filled**.
+ *
+ * - broken PDF: `status: "failure"` with one error item
+ * - worker error: `null`, no result is stored
+ */
+async function convert(form: FormData): Promise<ConvertResult | null> {
     const file = form.get('files') as File;
-    const broken = (await file.text()).includes(BROKEN_PDF_MARKER);
+    const text = await file.text();
+    if (text.includes(WORKER_ERROR_MARKER)) {
+        return null;
+    }
+    const broken = text.includes(BROKEN_PDF_MARKER);
     const formats = form.getAll('to_formats');
     return {
         document: {
@@ -615,19 +653,43 @@ function tableData(rows: string[][]): TableItem['data'] {
     };
 }
 
-/** Task status body; a done failed task carries the first error message. */
+/**
+ * **Task status body**.
+ *
+ * - a failed conversion still reports `success`; its failure is in the result body
+ * - only a worker error reports `failure`, with `error_message`
+ */
 function taskStatus(task: MockTask): object {
     const done = task.polls >= POLLS_UNTIL_DONE;
-    const failed = task.result.status === 'failure';
-    const status = done ? (failed ? 'failure' : 'success') : task.polls === 2 ? 'started' : 'pending';
+    const crashed = task.result === null;
+    const status = done ? (crashed ? 'failure' : 'success') : task.polls === 2 ? 'started' : 'pending';
     return {
         task_id: task.id,
         task_type: 'convert',
         task_status: status,
         task_position: status === 'pending' ? 1 : null,
         task_meta: null,
-        ...(done && failed ? { error_message: task.result.errors[0]?.error_message } : {}),
+        error_message: done && crashed ? WORKER_ERROR_MESSAGE : null,
     };
+}
+
+/** Resolves after `ms`; rejects with the signal's reason if it aborts first or is already aborted. */
+function waitOrAbort(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+        return Promise.reject(signal.reason);
+    }
+    return new Promise((resolve, reject) => {
+        /** Ends the wait early with the abort reason. */
+        function onAbort() {
+            clearTimeout(timer);
+            reject(signal.reason);
+        }
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 /** FastAPI validation error item for one form field. */

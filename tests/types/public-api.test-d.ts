@@ -41,6 +41,7 @@ import {
     type PdfBackend,
     type PictureItem,
     type Pipeline,
+    type PollOptions,
     type ProvenanceItem,
     type Result,
     readPngSize,
@@ -211,6 +212,60 @@ client.check({ kind: 'markdown', id: 'x' });
 // @ts-expect-error check() takes no conversion options
 client.check(job, { forceOcr: true });
 
+// --- Job helpers: run*() resolves like convert*(), waitForJob() like check() once done, without status.
+
+expectTypeOf(client.runMarkdown(pdf)).resolves.toEqualTypeOf<Result<WithSettings<ConvertedMarkdown>>>();
+expectTypeOf(client.runDocument(pdf)).resolves.toEqualTypeOf<Result<WithSettings<ConvertedDocument>>>();
+expectTypeOf(client.runMarkdown).returns.toEqualTypeOf<ReturnType<DoclingClient['convertMarkdown']>>();
+expectTypeOf(client.runDocument).returns.toEqualTypeOf<ReturnType<DoclingClient['convertDocument']>>();
+expectTypeOf(client.waitForJob(markdownJob)).resolves.toEqualTypeOf<Result<ConvertedMarkdown>>();
+expectTypeOf(client.waitForJob(documentJob)).resolves.toEqualTypeOf<Result<ConvertedDocument>>();
+expectTypeOf(client.waitForJob(job)).resolves.toEqualTypeOf<Result<ConvertedMarkdown | ConvertedDocument>>();
+expectTypeOf(client.waitForJob(jobRef)).resolves.toEqualTypeOf<Result<ConvertedMarkdown | ConvertedDocument>>();
+expectTypeOf(client.waitForJob({ kind: 'document', id: 'x' })).resolves.toEqualTypeOf<Result<ConvertedDocument>>();
+expectTypeOf<PollOptions>().toEqualTypeOf<CallOptions & { pollMs?: number }>();
+client.runMarkdown(pdf, {
+    images: 'extract',
+    imageOptions: { prefix: 'out/1234-' },
+    ocr: false,
+    pollMs: 1,
+    signal: AbortSignal.timeout(60_000),
+});
+client.runDocument(pdf, { pageImages: true, pollMs: 250 });
+client.waitForJob(documentJob, { pollMs: 100, signal: AbortSignal.abort() });
+createDoclingClient({ baseUrl: '', pollMs: 250 });
+declare const ranMarkdown: Result<WithSettings<ConvertedMarkdown>>;
+if (ranMarkdown.ok) {
+    expectTypeOf(ranMarkdown.data.settings).toEqualTypeOf<DoclingSettings>();
+    // @ts-expect-error run*() results carry no job status
+    ranMarkdown.data.status;
+}
+declare const waited: Result<ConvertedDocument>;
+if (waited.ok) {
+    // @ts-expect-error waitForJob() results carry neither status nor settings
+    waited.data.status;
+    // @ts-expect-error waitForJob() results carry neither status nor settings
+    waited.data.settings;
+}
+// @ts-expect-error pollMs only on the job helpers
+client.convertMarkdown(pdf, { pollMs: 10 });
+// @ts-expect-error pollMs only on the job helpers
+client.convertDocument(pdf, { pollMs: 10 });
+// @ts-expect-error pollMs only on the job helpers
+client.submitDocument(pdf, { pollMs: 10 });
+// @ts-expect-error pollMs only on the job helpers
+client.check(job, { pollMs: 10 });
+// @ts-expect-error waitForJob() takes no conversion options
+client.waitForJob(job, { ocr: false });
+// @ts-expect-error pollMs is a factory top-level setting, not a docling option
+createDoclingClient({ baseUrl: '', options: { pollMs: 10 } });
+// @ts-expect-error documents take no image options
+client.runDocument(pdf, { imageOptions: { prefix: 'x' } });
+// @ts-expect-error pollMs is a number of ms
+client.runMarkdown(pdf, { pollMs: '10' });
+// @ts-expect-error waitForJob() takes the job object, not only its id
+client.waitForJob('id');
+
 // --- Options are typed: invalid values do not compile.
 
 expectTypeOf<Pipeline>().toEqualTypeOf<'standard' | 'vlm'>();
@@ -256,7 +311,7 @@ client.convertMarkdown(pdf, { images: 'none' });
 client.convertDocument(pdf, { images: 'placeholder' });
 client.submitDocument(pdf, { images: 'embedded' });
 client.convertDocument(pdf, { pageImages: true });
-// @ts-expect-error the image scale is fixed at 2 (144 dpi)
+// @ts-expect-error imageScale is not supported
 client.convertDocument(pdf, { pageImages: true, imageScale: 1 });
 // @ts-expect-error page images exist only in the document output
 client.convertMarkdown(pdf, { pageImages: true });
@@ -278,13 +333,13 @@ client.convertDocument(pdf, { images: 'extract' });
 client.submitDocument(pdf, { imageOptions: { prefix: 'x' } });
 // @ts-expect-error image options need a prefix
 client.convertMarkdown(pdf, { images: 'extract', imageOptions: { omitSmall: true } });
-// @ts-expect-error pixel minimums were replaced by omitSmall
+// @ts-expect-error minHeight is not supported
 client.convertMarkdown(pdf, { images: 'extract', imageOptions: { prefix: 'x', minHeight: 50 } });
-// @ts-expect-error table mode is fixed
+// @ts-expect-error tableMode is not supported
 client.convertMarkdown(pdf, { tableMode: 'fast' });
-// @ts-expect-error md repairs were removed
+// @ts-expect-error repairs is not supported
 client.convertMarkdown(pdf, { repairs: false });
-// @ts-expect-error page numbers were removed
+// @ts-expect-error pageNumbers is not supported
 client.submitMarkdown(pdf, { pageNumbers: true });
 // @ts-expect-error the input is PDF or image bytes, not a path
 client.convertMarkdown('file.pdf');

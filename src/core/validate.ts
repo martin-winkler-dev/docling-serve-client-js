@@ -47,7 +47,6 @@ export function validateKeys<T extends object>(
         }
         valid[name] = Array.isArray(value) ? [...value] : value;
     }
-    // Every key was checked against its rule above.
     return valid as Partial<T>;
 }
 

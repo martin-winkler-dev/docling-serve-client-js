@@ -18,14 +18,14 @@ const TIFF_BE = new Uint8Array([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08])
 const WEBP = new TextEncoder().encode('RIFF\x24\x00\x00\x00WEBPVP8 ');
 
 describe('detectInputFormat', () => {
-    test('PDF: %PDF- within the first 1024 bytes', () => {
+    test('detects PDF format when %PDF- magic bytes occur within first 1024 bytes', () => {
         const pdf = { fromFormat: 'pdf', mimeType: 'application/pdf', fileName: 'document.pdf' } as const;
         expect(detectInputFormat(new TextEncoder().encode('%PDF-1.7\n...'))).toEqual(pdf);
         expect(detectInputFormat(new TextEncoder().encode('junk%PDF-1.7\n...'))).toEqual(pdf);
         expect(detectInputFormat(Buffer.from('%PDF-1.4'))).toEqual(pdf);
     });
 
-    test('images by their signature at byte 0, with docling format image and a matching file name', () => {
+    test('detects supported image formats by signature with matching MIME type and filename', () => {
         const cases: [Uint8Array, string, string][] = [
             [pngBytes(10, 10), 'image/png', 'document.png'],
             [JPEG, 'image/jpeg', 'document.jpg'],
@@ -38,12 +38,12 @@ describe('detectInputFormat', () => {
         }
     });
 
-    test('an image whose data contains %PDF- stays an image', () => {
+    test('preserves image detection when image payload contains %PDF- signature', () => {
         const png = new Uint8Array([...pngBytes(1, 1), ...new TextEncoder().encode('%PDF-')]);
         expect(detectInputFormat(png)?.fromFormat).toBe('image');
     });
 
-    test('unknown, partial, empty and non-Uint8Array input is undefined', () => {
+    test('returns undefined for empty, unknown, partial, or non-Uint8Array inputs', () => {
         const unknown = [
             new Uint8Array(),
             new TextEncoder().encode('hello'),

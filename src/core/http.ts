@@ -61,7 +61,7 @@ export function errorMessage(e: unknown): string {
 }
 
 // -------------------------------------------------------------------
-// --- 3. Internal Functions
+// --- 3. Private Functions
 // -------------------------------------------------------------------
 
 /** Checks whether an error indicates body size exceeded memory or maximum string length. */
@@ -89,8 +89,6 @@ function errorDetail(text: string): string {
             const { detail } = body;
             return typeof detail === 'string' ? detail : JSON.stringify(detail);
         }
-    } catch {
-        // Not JSON: fall back to raw text
-    }
+    } catch {}
     return text.slice(0, 500) || 'no response body';
 }

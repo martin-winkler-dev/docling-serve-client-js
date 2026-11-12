@@ -5,7 +5,7 @@ import type { ErrorCode } from './core/result.js';
 import type { DoclingDocument } from './document.js';
 
 // -------------------------------------------------------------------
-// --- 1. Result & Error Types
+// --- 1. Types
 // -------------------------------------------------------------------
 
 /** Identifies failure cause across validation, network, HTTP, and conversion. */
@@ -90,9 +90,7 @@ export type ServerError = {
  */
 export type ServerVersions = Record<string, string>;
 
-// -------------------------------------------------------------------
-// --- 2. Options
-// -------------------------------------------------------------------
+// Options
 
 /**
  * **Bytes of the file to convert; the format is detected by magic bytes**.
@@ -103,10 +101,7 @@ export type ServerVersions = Record<string, string>;
  */
 export type ConvertInput = Uint8Array;
 
-/**
- * Use `ConvertInput`; images are accepted as well.
- * @deprecated
- */
+/** Deprecated: use `ConvertInput`; images are accepted as well. */
 export type PdfInput = ConvertInput;
 
 /** Supported conversion pipeline backend. */
@@ -146,6 +141,7 @@ export type DoclingOptions = {
     /**
      * **OCRs whole PDF pages and drops their text layer**: for PDFs with broken text. Default `false`.
      *
+     * - enables OCR even with `ocr: false` (docling skips full-page OCR when `do_ocr=false`)
      * - ignored for image input: it has no text layer, and full-page OCR there merges words (`stepsand`)
      */
     forceOcr?: boolean;
@@ -167,6 +163,17 @@ export type ClientOptions = DoclingOptions & {
 export type CallOptions = {
     /** Abort signal to cancel the HTTP request. */
     signal?: AbortSignal;
+};
+
+/**
+ * **Options for job helpers (`runMarkdown`, `runDocument`, `waitForJob`)**.
+ *
+ * - `signal` covers entire call: submit, status polls, and waits
+ * - rejected by `convert*`, `submit*`, and `check`
+ */
+export type PollOptions = CallOptions & {
+    /** Delay between status polls in ms (integer `1..2147483647`). Default: factory `pollMs` (`10`). */
+    pollMs?: number;
 };
 
 /**
@@ -213,9 +220,7 @@ export type DocumentOptions = DoclingOptions &
         pageImages?: boolean;
     };
 
-// -------------------------------------------------------------------
-// --- 3. Outputs
-// -------------------------------------------------------------------
+// Outputs
 
 /** Pixel dimensions of an image. */
 export type ImageSize = {
@@ -359,14 +364,12 @@ export type DoclingSettings = {
     abortOnError: boolean;
 };
 
-/** Sync conversion result plus the settings sent with its request. */
+/** Result of `convert*` and `run*` plus the settings sent with the conversion. */
 export type WithSettings<T> = T & {
     settings: DoclingSettings;
 };
 
-// -------------------------------------------------------------------
-// --- 4. Asynchronous Jobs
-// -------------------------------------------------------------------
+// Asynchronous Jobs
 
 /** Image handling of a md job, applied when `check()` picks up the result. */
 export type MarkdownJobOutput =
@@ -407,9 +410,7 @@ export type JobState<T> =
     /** Completed; carries the conversion result. */
     | ({ status: 'done' } & T);
 
-// -------------------------------------------------------------------
-// --- 5. Server Capabilities
-// -------------------------------------------------------------------
+// Server Capabilities
 
 /** Model or engine preset a pipeline stage offers; `id` is the value of the stage's form field. */
 export type CapabilityPreset = {
@@ -464,18 +465,18 @@ export type ServerCapabilities = {
     };
 };
 
-// -------------------------------------------------------------------
-// --- 6. Client
-// -------------------------------------------------------------------
+// Client
 
 /** Configuration passed to `createDoclingClient`. */
 export type DoclingConfig = {
-    /** docling-serve base URL, e.g. `'http://127.0.0.1:5001'`; trailing `/` are removed. */
+    /** docling-serve base URL, e.g. `'http://127.0.0.1:5001'`; trailing `/` removed; no query, fragment, or credentials. */
     baseUrl: string;
     /** Sent as `X-Api-Key` header. */
     apiKey?: string;
-    /** Limit per request in ms (not `/version`); on expiry the call resolves with `aborted`. */
+    /** Time limit per request in ms (integer `1..2147483647`, excludes `/version`); resolves to `aborted` on expiry. */
     timeoutMs?: number;
+    /** Delay between job helper status polls in ms (integer `1..2147483647`). Default `10`. */
+    pollMs?: number;
     /** Custom fetch implementation for mocking or custom dispatchers. */
     fetch?: typeof fetch;
     /** Defaults for every call; call options override them key by key, except the factory-only ones. */
@@ -483,10 +484,12 @@ export type DoclingConfig = {
 };
 
 /**
- * **docling-serve client**.
+ * **docling-serve client**: every call returns a Promise.
  *
- * - `convert*`: one synchronous request
- * - `submit*` + `check`: async job; the caller stores the job and polls
+ * - single request (`convert*`): one HTTP request to sync endpoint; answers on `DOCLING_SERVE_SYNC_POLL_INTERVAL`
+ *   ticks (default 2 s) and returns 504 after `DOCLING_SERVE_MAX_SYNC_WAIT`
+ * - job (`submit*` + `check`): async endpoints; caller stores job and polls
+ * - job helper (`run*`, `waitForJob`): submits or takes a job and polls every `pollMs` until done
  */
 export type DoclingClient = {
     /** PDF or image to docling's md; images as placeholders, removed or extracted. */
@@ -500,14 +503,46 @@ export type DoclingClient = {
     /**
      * **Polls a job; fetches its result once done**.
      *
-     * - docling-serve deletes a result `DOCLING_SERVE_RESULT_REMOVAL_DELAY` seconds (default 300) after its first
-     *   fetch: a `check` whose result download failed can be repeated within that time, later it returns
-     *   `not_found`; persist `done` data, or start docling-serve with `DOCLING_SERVE_SINGLE_USE_RESULTS=false`
-     * - `done` carries no settings: they are on the job
+     * - docling-serve deletes the task `DOCLING_SERVE_RESULT_REMOVAL_DELAY` seconds (default 300) after first
+     *   result fetch: a `check` whose result download failed can be repeated within that window, later returning
+     *   `not_found` (`Unknown job id`); persist `done` data, or set `DOCLING_SERVE_SINGLE_USE_RESULTS=false`
+     * - `done` carries no settings (stored on the job)
      */
     check(job: Omit<MarkdownJob, 'settings'>, options?: CallOptions): Promise<Result<JobState<ConvertedMarkdown>>>;
     check(job: Omit<DocumentJob, 'settings'>, options?: CallOptions): Promise<Result<JobState<ConvertedDocument>>>;
     check(job: JobRef, options?: CallOptions): Promise<Result<JobState<ConvertedMarkdown | ConvertedDocument>>>;
+    /**
+     * **Submits an md job and polls every `pollMs` until done**: same result as `convertMarkdown`.
+     *
+     * - `signal` covers submit, status polls, and waits; `timeoutMs` limits each HTTP request
+     * - first error ends call; job never returned (use `submitMarkdown` + `waitForJob` to keep it)
+     * - aborting does not cancel the server-side job
+     */
+    runMarkdown(
+        input: ConvertInput,
+        options?: MarkdownOptions & PollOptions,
+    ): Promise<Result<WithSettings<ConvertedMarkdown>>>;
+    /**
+     * **Submits a document job and polls every `pollMs` until done**: same result as `convertDocument`.
+     *
+     * - `signal` covers submit, status polls, and waits; `timeoutMs` limits each HTTP request
+     * - first error ends call; job never returned (use `submitDocument` + `waitForJob` to keep it)
+     * - aborting does not cancel the server-side job
+     */
+    runDocument(
+        input: ConvertInput,
+        options?: DocumentOptions & PollOptions,
+    ): Promise<Result<WithSettings<ConvertedDocument>>>;
+    /**
+     * **Polls an existing job every `pollMs` until done**.
+     *
+     * - first status poll runs immediately; already-finished jobs cost one `check`
+     * - resolves to `check`'s `done` data without `status`; first error ends call
+     * - repeatable after a failed result download within `DOCLING_SERVE_RESULT_REMOVAL_DELAY` (default 300 s)
+     */
+    waitForJob(job: Omit<MarkdownJob, 'settings'>, options?: PollOptions): Promise<Result<ConvertedMarkdown>>;
+    waitForJob(job: Omit<DocumentJob, 'settings'>, options?: PollOptions): Promise<Result<ConvertedDocument>>;
+    waitForJob(job: JobRef, options?: PollOptions): Promise<Result<ConvertedMarkdown | ConvertedDocument>>;
     /** Installed presets, limits and features of the server; on demand only, never used by conversions. */
     capabilities(options?: CallOptions): Promise<Result<ServerCapabilities>>;
 };
